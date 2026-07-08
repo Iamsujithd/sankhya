@@ -316,13 +316,12 @@ function renderAssistantResponse(data) {
         bubble.appendChild(p);
     }
 
-    // ── Error notice ──
-    if (data.status === 'error' && data.error) {
-        const errBox = document.createElement('div');
-        errBox.className = 'error-box';
-        errBox.textContent = 'Execution encountered an issue. The explanation above should help clarify what happened.';
-        bubble.appendChild(errBox);
+    // Subtle visual tint for error state (no text — explanation covers it)
+    if (data.status === 'error') {
+        bubble.style.borderLeftColor = 'rgba(244,63,94,0.35)';
+        bubble.style.borderLeftWidth = '3px';
     }
+
 
     // ── Tabular result ──
     if (data.answer && data.answer.type === 'table') {

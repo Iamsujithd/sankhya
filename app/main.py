@@ -134,17 +134,39 @@ async def chat_with_data(message: str = Form(...)):
         # Decide whether this needs code execution or a plain chat reply.
         # Uses a tiny max_tokens=5 call — very fast and cheap.
         # ══════════════════════════════════════════════════════════════════
-        classifier_prompt = f"""You are a query intent classifier for an AI data analyst tool.
-The user has uploaded a dataset with these columns: {cols_info}
-Dataset: {filename} — {df.shape[0]} rows × {df.shape[1]} columns
+        classifier_prompt = f"""You are a query intent classifier. Classify the user message as CODE or CHAT.
 
-Classify the user's message as exactly one of:
-- CODE  → needs data computation, statistics, filtering, aggregation, visualization, ML prediction, groupby, correlation, missing values, sorting, or any operation ON the dataset rows/columns
-- CHAT  → general conversation, greetings ("hi", "hello", "thanks"), questions about capabilities ("what can you do?"), meta questions, explaining a concept without computing, "who are you", "what is this tool", vague filler messages
+Dataset loaded: {filename} — columns: {cols_info}
+
+CODE = the user wants you to compute, calculate, filter, aggregate, plot, visualize, predict, or run any operation on the actual dataset data.
+Examples of CODE:
+  "show me the top 5 rows"
+  "what is the average MEDV?"
+  "plot a histogram of AGE"
+  "find missing values"
+  "correlation between RM and MEDV"
+  "train a regression model"
+  "how many rows have CHAS=1?"
+
+CHAT = the user is asking a general, advisory, conceptual, or conversational question that does NOT require computing on the data.
+Examples of CHAT:
+  "hello" / "hi" / "thanks"
+  "what can you do?"
+  "who are you?"
+  "what does the CRIM column mean?"
+  "what is correlation?"
+  "what might be the KPI for this dataset?"
+  "what insights can I get from this?"
+  "what should I analyze first?"
+  "explain what LSTAT represents"
+  "is this dataset useful for machine learning?"
+  "what are the key features here?"
+
+IMPORTANT: If in doubt, classify as CHAT. Only classify as CODE if the user clearly wants a computation or chart.
 
 User message: "{message}"
 
-Reply with a single word only: CODE or CHAT"""
+Reply with one word only: CODE or CHAT"""
 
         intent_resp = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -165,11 +187,13 @@ Columns and types: {cols_info}
 Sample values per column: {sample_vals}
 
 Guidelines:
-- If greeted, respond warmly and briefly introduce yourself and your capabilities for this specific dataset.
-- If asked what you can do, list specific things relevant to THIS dataset (mention column names, suggest useful analyses).
-- If asked about a column by name, describe it based on its type and sample values.
-- If asked a general data science concept, explain it clearly and briefly, relating it to the loaded dataset where possible.
-- Keep responses concise (2-5 sentences max). Use **bold** for emphasis on key terms or column names."""
+- Greetings: respond warmly, introduce yourself briefly, mention you can analyze this specific dataset.
+- Capabilities: list concrete analyses possible with THIS dataset (name actual columns).
+- Column questions: describe the column based on its dtype and sample values.
+- Concept questions: explain the concept clearly, then relate it to this dataset's columns.
+- Advisory/opinion questions ("what KPI should I track?", "what should I analyze first?", "what insights might I find?"): give expert data science advice specific to this dataset — suggest meaningful analyses, important columns to explore, potential patterns or relationships worth investigating.
+- Keep responses concise (2-5 sentences). Use **bold** for key terms or column names.
+- Never say you cannot answer — always provide a helpful, expert response."""
 
             chat_resp = client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
