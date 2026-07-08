@@ -130,81 +130,63 @@ async def chat_with_data(message: str = Form(...)):
 
     try:
         # ══════════════════════════════════════════════════════════════════
-        # STEP 1: INTENT CLASSIFICATION
-        # Decide whether this needs code execution or a plain chat reply.
-        # Uses a tiny max_tokens=5 call — very fast and cheap.
+        # STEP 1: COMBINED CLASSIFIER + CHAT RESPONSE (single LLM call)
+        # The model classifies the intent AND generates the reply in one
+        # shot — eliminating the extra round-trip for CHAT queries.
         # ══════════════════════════════════════════════════════════════════
-        classifier_prompt = f"""You are a query intent classifier. Classify the user message as CODE or CHAT.
+        combined_prompt = f"""You are Sankhya — an expert AI data companion.
+The user has loaded a dataset: "{filename}" with {df.shape[0]} rows × {df.shape[1]} columns.
+Columns & types: {cols_info}
+Sample values (first 3 per column): {sample_vals}
 
-Dataset loaded: {filename} — columns: {cols_info}
+TASK: Decide whether the user's message needs Python code execution on the data, or can be answered conversationally.
 
-CODE = the user wants you to compute, calculate, filter, aggregate, plot, visualize, predict, or run any operation on the actual dataset data.
-Examples of CODE:
-  "show me the top 5 rows"
-  "what is the average MEDV?"
-  "plot a histogram of AGE"
-  "find missing values"
-  "correlation between RM and MEDV"
-  "train a regression model"
-  "how many rows have CHAS=1?"
+=== INTENT RULES ===
+Reply with intent=CODE if the user wants: computation, calculation, filtering, aggregation, statistics, plotting, visualization, ML, prediction, groupby, correlation, missing values, sorting — anything that runs on the actual data rows.
 
-CHAT = the user is asking a general, advisory, conceptual, or conversational question that does NOT require computing on the data.
-Examples of CHAT:
-  "hello" / "hi" / "thanks"
-  "what can you do?"
-  "who are you?"
-  "what does the CRIM column mean?"
-  "what is correlation?"
-  "what might be the KPI for this dataset?"
-  "what insights can I get from this?"
-  "what should I analyze first?"
-  "explain what LSTAT represents"
-  "is this dataset useful for machine learning?"
-  "what are the key features here?"
+Reply with intent=CHAT for everything else: greetings, general questions, advisory/opinion, concept explanations, column descriptions, capability questions, "what KPI", "what should I analyze", "who are you", "explain X", "is this good for ML?", etc.
+When in doubt → CHAT.
 
-IMPORTANT: If in doubt, classify as CHAT. Only classify as CODE if the user clearly wants a computation or chart.
+=== OUTPUT FORMAT (strict JSON, no markdown) ===
+If CHAT: {{"intent":"CHAT","reply":"<your answer here>"}}
+If CODE: {{"intent":"CODE"}}
+
+=== CHAT GUIDELINES (only used when intent=CHAT) ===
+- Greetings: warm intro, mention what you can do with this specific dataset
+- Advisory ("what KPI?", "what to analyze?"): give expert data science advice, name actual columns
+- Column questions: describe based on dtype and sample values  
+- Concept questions: explain clearly, relate to this dataset
+- Keep reply to 2-5 sentences. Use **bold** for key terms/column names.
+- Never say you can't answer.
 
 User message: "{message}"
 
-Reply with one word only: CODE or CHAT"""
+Respond with JSON only:"""
 
-        intent_resp = client.chat.completions.create(
+        combined_resp = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": classifier_prompt}],
+            messages=[{"role": "user", "content": combined_prompt}],
             temperature=0,
-            max_tokens=5
+            max_tokens=512
         )
-        raw_intent = intent_resp.choices[0].message.content.strip().upper()
-        is_code = raw_intent.startswith("CODE")
+        raw = combined_resp.choices[0].message.content.strip()
+
+        # Parse JSON response — strip any accidental markdown wrapping
+        json_str = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=re.MULTILINE).strip()
+        try:
+            parsed = json.loads(json_str)
+        except json.JSONDecodeError:
+            # Fallback: if JSON is malformed, try to detect intent from raw text
+            is_code_fallback = '"intent":"CODE"' in raw or raw.upper().startswith('CODE')
+            parsed = {"intent": "CODE" if is_code_fallback else "CHAT", "reply": raw}
+
+        is_code = parsed.get("intent", "CHAT").upper() == "CODE"
 
         # ══════════════════════════════════════════════════════════════════
-        # STEP 2A: CHAT PATH — conversational reply, no code execution
+        # STEP 2A: CHAT PATH — reply already generated above, just return it
         # ══════════════════════════════════════════════════════════════════
         if not is_code:
-            system_prompt = f"""You are Sankhya — a warm, expert AI data companion and data scientist.
-The user has loaded a dataset called "{filename}" with {df.shape[0]} rows and {df.shape[1]} columns.
-Columns and types: {cols_info}
-Sample values per column: {sample_vals}
-
-Guidelines:
-- Greetings: respond warmly, introduce yourself briefly, mention you can analyze this specific dataset.
-- Capabilities: list concrete analyses possible with THIS dataset (name actual columns).
-- Column questions: describe the column based on its dtype and sample values.
-- Concept questions: explain the concept clearly, then relate it to this dataset's columns.
-- Advisory/opinion questions ("what KPI should I track?", "what should I analyze first?", "what insights might I find?"): give expert data science advice specific to this dataset — suggest meaningful analyses, important columns to explore, potential patterns or relationships worth investigating.
-- Keep responses concise (2-5 sentences). Use **bold** for key terms or column names.
-- Never say you cannot answer — always provide a helpful, expert response."""
-
-            chat_resp = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": message}
-                ],
-                temperature=0.6
-            )
-            reply = chat_resp.choices[0].message.content
-
+            reply = parsed.get("reply", "I'm ready to help — ask me anything about your dataset!")
             return make_json_safe({
                 "status": "success",
                 "intent": "chat",
@@ -215,6 +197,7 @@ Guidelines:
                 "image": None,
                 "error": None
             })
+
 
         # ══════════════════════════════════════════════════════════════════
         # STEP 2B: CODE PATH — generate & execute Python, then explain

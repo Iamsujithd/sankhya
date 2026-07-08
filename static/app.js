@@ -208,9 +208,18 @@ async function submitQuery(message) {
     const formData = new FormData();
     formData.append('message', message);
 
-    try {
-        const res = await fetch('/chat', { method: 'POST', body: formData });
+    // Abort controller — prevents silent "Load failed" on slow responses
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 90_000); // 90s max
 
+    try {
+        const res = await fetch('/chat', {
+            method: 'POST',
+            body: formData,
+            signal: controller.signal
+        });
+
+        clearTimeout(timeout);
         removeElement(loadingId);
 
         if (!res.ok) {
@@ -223,10 +232,21 @@ async function submitQuery(message) {
         setStatus('Ready', 'green');
 
     } catch (err) {
+        clearTimeout(timeout);
         console.error('[Chat Error]', err);
         removeElement(loadingId);
-        appendAssistantError(`Request failed: ${err.message}`);
-        setStatus('Error — ready for next query', 'green');
+
+        let friendlyMsg;
+        if (err.name === 'AbortError') {
+            friendlyMsg = 'The request took too long and was cancelled. Try a simpler query or try again.';
+        } else if (err.message.includes('Load failed') || err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {
+            friendlyMsg = 'Network error — the server may be restarting. Please wait a moment and try again.';
+        } else {
+            friendlyMsg = err.message || 'Something went wrong. Please try again.';
+        }
+
+        appendAssistantError(friendlyMsg);
+        setStatus('Ready', 'green');
     } finally {
         isLoading = false;
         sendBtn.disabled = false;
