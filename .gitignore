@@ -1,7 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
 *.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Environment / secrets
+.env
+.env.*
+*.env
+
+# Editor / OS
+.DS_Store
 *.swp
 *.swo
-*.DS_Store
-*.ipynb_checkpoints
+Thumbs.db
+
+# Data
 data/
+*.ipynb_checkpoints
+
+# Test files
 test.py
+test_*.py
+
+# Deployment artifacts
+deployment_guide.md
