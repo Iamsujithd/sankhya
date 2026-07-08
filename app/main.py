@@ -113,24 +113,56 @@ async def chat_with_data(message: str = Form(...)):
     df = store["df"]
     cols_info = ", ".join([f"{col} ({dtype})" for col, dtype in zip(df.columns, df.dtypes)])
     
+    # Detect available sklearn for ML queries
+    try:
+        import sklearn  # noqa
+        sklearn_available = True
+    except ImportError:
+        sklearn_available = False
+
+    # Build column sample values for richer context
+    sample_vals = {}
+    for col in df.columns[:8]:
+        vals = df[col].dropna().head(3).tolist()
+        sample_vals[col] = vals
+
     # Prompt to write code
-    code_prompt = f"""You are Sankhya, a wise data mathematician and expert data scientist. The user has uploaded a dataset.
-Dataset context `df`:
-- Columns & Types: {cols_info}
-- Shape: {df.shape}
+    code_prompt = f"""You are Sankhya — a world-class AI data scientist and mathematician. The user uploaded a dataset and you must write Python code that fully and correctly answers their query.
 
-User query: "{message}"
+=== DATASET CONTEXT ===
+Preloaded variable: `df` (pandas DataFrame — DO NOT reload from file)
+Shape: {df.shape[0]} rows × {df.shape[1]} columns
+Columns & dtypes: {cols_info}
+Sample values (first 3 per column): {sample_vals}
+scikit-learn available: {sklearn_available}
 
-Write a Python code block to answer this query. Follow these rules:
-1. The preloaded DataFrame is named `df`. Do not load it again from a file.
-2. To output tabular results, descriptive statistics, filters, calculations, or groupings, assign it to the `answer` variable (e.g. `answer = df.describe()`, `answer = df.head()`, or `answer = df.dtypes`).
-3. To plot a chart, build a Plotly chart (Express `px` or Graph Objects `go`) and assign it to a variable named `fig`. 
-   - CRITICAL: `plotly.express` (`px`) does NOT have a `.dataframe()` or `.table()` function. Never use `px.dataframe` or `px.table`. If the user asks for tables or raw data, assign the DataFrame directly to `answer` instead of plotting.
-4. Return ONLY the python code block wrapped in standard markdown syntax:
+=== USER QUERY ===
+{message}
+
+=== RULES ===
+1. **DataFrame**: Use the existing `df` variable. Never read from a file.
+2. **Tabular output**: Assign a DataFrame or Series to `answer`.
+   - Stats: `answer = df.describe()` or `answer = df.groupby(...).agg(...)`
+   - Filter: `answer = df[df['col'] > value]`
+   - Correlation: `answer = df.corr(numeric_only=True)` then plot it
+   - Missing: `answer = df.isnull().sum().reset_index(name='missing_count')`
+3. **Charts**: Assign a Plotly figure to `fig`.
+   - Use `import plotly.express as px` or `import plotly.graph_objects as go`
+   - NEVER use `px.dataframe`, `px.table`, `go.Table` as primary output — assign tables to `answer` instead
+   - For heatmaps: `fig = px.imshow(df.corr(numeric_only=True), ...)` 
+   - For histograms: use `px.histogram(df, x='col')`
+   - For scatter: use `px.scatter(df, x='col1', y='col2')`
+   - For bar: use `px.bar(df, x='col', y='val')`
+4. **Machine learning** (if sklearn available): Use sklearn for regression, classification, or clustering. Always assign results to `answer`.
+5. **Text analytics**: If the query involves text columns, use basic string operations or sklearn's TfidfVectorizer.
+6. **Handle errors gracefully**: If a column doesn't exist, select the closest matching one. If numeric operations are requested on text columns, convert or skip gracefully.
+7. **One answer at a time**: If the user asks for both a table and chart, produce both `answer` AND `fig`.
+8. Do NOT use `print()` — assign results to `answer` or `fig`.
+9. Do NOT include any explanation. Return ONLY the Python code block:
+
 ```python
-# python code here
-```
-Do not include any explanation or extra text. Only return the code block."""
+# code here
+```"""
 
     try:
         # Call Groq API
@@ -218,23 +250,35 @@ Do not include any explanation or extra text. Only return the code block."""
             
         # Explanatory prompt
         if exec_success:
-            summary_prompt = f"""You are Sankhya, the divine data companion.
-User Query: {message}
-Executed Code:
-```python
-{code_str}
-```
-Result Object (answer):
-{str(answer)[:1000]}
+            has_chart = fig is not None
+            has_table = answer_data is not None and answer_data.get("type") == "table"
+            has_image = matplotlib_img is not None
+            result_preview = str(answer)[:1500] if answer is not None else "(chart/visualization generated)"
 
-Explain this result to the user in a professional, warm, and concise tone. Mention that you have processed the calculations or plotted the chart as requested. Keep the summary under 4 sentences."""
+            summary_prompt = f"""You are Sankhya — a brilliant AI data scientist known for clear, insightful explanations.
+
+User Query: "{message}"
+
+What was produced:
+- Chart/Plot: {"Yes" if has_chart or has_image else "No"}
+- Data Table: {"Yes" if has_table else "No"}
+- Result preview: {result_preview}
+
+Write a concise, insightful explanation (2-4 sentences) that:
+1. Directly answers the user's query — don't say "I have processed"; say what the result actually tells us
+2. Highlights key findings or notable numbers if applicable
+3. Suggests a smart follow-up question the user might want to ask
+Use **bold** for important numbers or column names. Be professional yet warm. No bullet points — flowing sentences only."""
         else:
-            summary_prompt = f"""You are Sankhya, the divine data companion.
-User Query: {message}
-The code generated failed to execute with this error:
-{exec_error}
+            summary_prompt = f"""You are Sankhya — an expert AI data scientist.
 
-Provide a helpful, polite explanation to the user about what went wrong and guide them on how to reformulate the query. Keep it brief."""
+User Query: "{message}"
+Execution error: {exec_error[:600] if exec_error else "Unknown error"}
+
+Explain in 2-3 sentences:
+1. What likely went wrong (in plain English, not technical jargon)
+2. A specific, actionable suggestion to reformulate the query (e.g. "Try asking: 'What is the average MEDV by CHAS?'")
+Be warm and helpful. No apologies needed — just guide them forward."""
 
         summary_response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",

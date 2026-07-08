@@ -1,428 +1,614 @@
-// Global state variables
-let isFileUploaded = false;
-let activeFilename = "";
+/* ═══════════════════════════════════════════
+   SANKHYA AI — Application Logic
+   Handles: file upload, chat, rendering
+   ═══════════════════════════════════════════ */
 
-// DOM Elements
-const dropZone = document.getElementById('drop-zone');
-const fileInput = document.getElementById('file-input');
-const datasetInfo = document.getElementById('dataset-info');
-const columnsList = document.getElementById('columns-list');
+'use strict';
+
+// ── DOM refs ──
+const dropZone     = document.getElementById('drop-zone');
+const fileInput    = document.getElementById('file-input');
+const datasetInfo  = document.getElementById('dataset-info');
+const columnsList  = document.getElementById('columns-list');
 const metaFilename = document.getElementById('meta-filename');
-const metaShape = document.getElementById('meta-shape');
-const statusText = document.getElementById('status-text');
-const pulseDot = document.querySelector('.pulse-dot');
+const metaShape    = document.getElementById('meta-shape');
+const statusText   = document.getElementById('status-text');
+const statusDot    = document.getElementById('status-dot');
 const chatMessages = document.getElementById('chat-messages');
-const chatForm = document.getElementById('chat-form');
-const chatInput = document.getElementById('chat-input');
-const sendBtn = document.getElementById('send-btn');
-const suggestions = document.getElementById('suggestions');
+const chatForm     = document.getElementById('chat-form');
+const chatInput    = document.getElementById('chat-input');
+const sendBtn      = document.getElementById('send-btn');
+const suggestions  = document.getElementById('suggestions');
+const welcomeState = document.getElementById('welcome-state');
 
-// Drag and drop event handlers
+// ── State ──
+let fileUploaded = false;
+let isLoading    = false;
+
+// ════════════════════════════
+// STATUS HELPERS
+// ════════════════════════════
+
+function setStatus(text, color = 'green') {
+    statusText.textContent = text;
+    statusDot.className = `status-dot ${color}`;
+}
+
+// ════════════════════════════
+// FILE UPLOAD
+// ════════════════════════════
+
 dropZone.addEventListener('click', () => fileInput.click());
+
+dropZone.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        fileInput.click();
+    }
+});
 
 dropZone.addEventListener('dragover', (e) => {
     e.preventDefault();
     dropZone.classList.add('dragover');
 });
 
-dropZone.addEventListener('dragleave', () => {
-    dropZone.classList.remove('dragover');
+dropZone.addEventListener('dragleave', (e) => {
+    if (!dropZone.contains(e.relatedTarget)) {
+        dropZone.classList.remove('dragover');
+    }
 });
 
 dropZone.addEventListener('drop', (e) => {
     e.preventDefault();
     dropZone.classList.remove('dragover');
-    if (e.dataTransfer.files.length > 0) {
-        handleFileUpload(e.dataTransfer.files[0]);
-    }
+    const file = e.dataTransfer.files[0];
+    if (file) handleFileUpload(file);
 });
 
 fileInput.addEventListener('change', (e) => {
-    if (e.target.files.length > 0) {
-        handleFileUpload(e.target.files[0]);
-    }
+    const file = e.target.files[0];
+    if (file) handleFileUpload(file);
+    fileInput.value = '';
 });
 
-// File Upload Logic
 async function handleFileUpload(file) {
-    statusText.textContent = "Uploading and analyzing dataset...";
-    pulseDot.className = "pulse-dot blue";
-    
+    const MAX_MB = 50;
+    if (file.size > MAX_MB * 1024 * 1024) {
+        appendAssistantError(`File too large (${(file.size / 1e6).toFixed(1)} MB). Please upload a file under ${MAX_MB} MB.`);
+        return;
+    }
+
+    const allowed = ['.csv', '.xls', '.xlsx', '.json'];
+    const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase();
+    if (!allowed.includes(ext)) {
+        appendAssistantError(`Unsupported format "${ext}". Please upload a CSV, Excel (.xls / .xlsx), or JSON file.`);
+        return;
+    }
+
+    setStatus('Uploading and analyzing dataset…', 'blue');
+
     const formData = new FormData();
-    formData.append("file", file);
-    
+    formData.append('file', file);
+
     try {
-        const response = await fetch("/upload", {
-            method: "POST",
-            body: formData
-        });
-        
-        if (!response.ok) {
-            const errData = await response.json();
-            throw new Error(errData.detail || "Upload failed");
+        const res = await fetch('/upload', { method: 'POST', body: formData });
+
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: 'Upload failed' }));
+            throw new Error(err.detail || 'Upload failed');
         }
-        
-        const data = await response.json();
-        
-        // Update state
-        isFileUploaded = true;
-        activeFilename = data.filename;
-        
-        // Show metadata
+
+        const data = await res.json();
+
+        // Populate sidebar metadata
         metaFilename.textContent = data.filename;
-        metaShape.textContent = `${data.shape[0]} rows x ${data.shape[1]} columns`;
-        
-        // Populate column list
-        columnsList.innerHTML = "";
+        metaFilename.title = data.filename;
+        metaShape.textContent = `${data.shape[0]} × ${data.shape[1]}`;
+
+        // Render column list
+        columnsList.innerHTML = '';
         data.columns.forEach(col => {
-            const token = document.createElement("div");
-            token.className = "column-token";
-            
-            // Map types to categories
-            let badgeClass = "text";
-            let typeLabel = col.type;
-            if (col.type.includes("int") || col.type.includes("float")) {
-                badgeClass = "numeric";
-                typeLabel = "num";
-            } else if (col.type === "object" || col.type === "category") {
-                badgeClass = "categorical";
-                typeLabel = "cat";
+            const row = document.createElement('div');
+            row.className = 'column-row';
+            row.setAttribute('role', 'listitem');
+
+            let badgeClass = 'text';
+            let label = col.type;
+            if (/int|float|double|decimal|number/i.test(col.type)) {
+                badgeClass = 'numeric'; label = 'num';
+            } else if (/object|string|category|str/i.test(col.type)) {
+                badgeClass = 'category'; label = 'cat';
+            } else if (/date|time|datetime/i.test(col.type)) {
+                badgeClass = 'date'; label = 'date';
             }
-            
-            token.innerHTML = `
-                <span class="col-name" title="${col.name}">${col.name}</span>
-                <span class="col-badge ${badgeClass}">${typeLabel}</span>
+
+            row.innerHTML = `
+                <span class="col-name" title="${escHtml(col.name)}">${escHtml(col.name)}</span>
+                <span class="col-badge ${badgeClass}" aria-label="${label} type">${label}</span>
             `;
-            columnsList.appendChild(token);
+            columnsList.appendChild(row);
         });
-        
-        datasetInfo.classList.remove("hidden");
-        
-        // Enable chat inputs
-        chatInput.removeAttribute("disabled");
-        sendBtn.removeAttribute("disabled");
-        suggestions.classList.remove("hidden");
-        chatInput.placeholder = "Ask Sankhya about the dataset...";
-        
-        statusText.textContent = `Connected — ${data.filename} loaded successfully`;
-        pulseDot.className = "pulse-dot green";
-        
-        // Push system greeting in chat
-        addMessage("assistant", `Successfully loaded <strong>${data.filename}</strong>. Try asking suggestions like **Show Overview** or query specific columns!`);
-        
+
+        datasetInfo.classList.remove('hidden');
+
+        // Enable chat
+        chatInput.removeAttribute('disabled');
+        sendBtn.removeAttribute('disabled');
+        chatInput.placeholder = 'Ask anything about your data…';
+
+        // Show suggestions
+        suggestions.classList.remove('hidden');
+
+        // Remove welcome state, show chat
+        if (welcomeState) welcomeState.style.display = 'none';
+
+        setStatus(`${data.filename} — ${data.shape[0]} rows · ${data.shape[1]} columns`, 'green');
+        fileUploaded = true;
+
+        // Greeting message
+        appendAssistantMessage(
+            `Dataset <strong>${escHtml(data.filename)}</strong> loaded successfully — ` +
+            `<strong>${data.shape[0]}</strong> rows and <strong>${data.shape[1]}</strong> columns. ` +
+            `I'm ready to analyze your data. Try the suggestion chips above, or ask me anything!`
+        );
+
     } catch (err) {
-        console.error(err);
-        statusText.textContent = "Upload failed — check file format";
-        pulseDot.className = "pulse-dot red";
-        addMessage("assistant", `⚠️ Failed to upload file. Details: ${err.message}`);
+        console.error('[Upload Error]', err);
+        setStatus('Upload failed', 'red');
+        appendAssistantError(`Upload error: ${err.message}`);
     }
 }
 
-// Chat submit handler
+// ════════════════════════════
+// CHAT
+// ════════════════════════════
+
 chatForm.addEventListener('submit', (e) => {
     e.preventDefault();
-    const message = chatInput.value.trim();
-    if (!message) return;
-    
-    // Clear input
-    chatInput.value = "";
-    
-    submitQuery(message);
+    const text = chatInput.value.trim();
+    if (!text || isLoading) return;
+    chatInput.value = '';
+    submitQuery(text);
 });
 
-// Suggestion click
+chatInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        const text = chatInput.value.trim();
+        if (text && !isLoading) {
+            chatInput.value = '';
+            submitQuery(text);
+        }
+    }
+});
+
 function sendSuggestion(text) {
+    if (!fileUploaded || isLoading) return;
     submitQuery(text);
 }
 
-// Submit chat query to FastAPI
 async function submitQuery(message) {
-    // Add user message
-    addMessage("user", message);
-    
-    // Add loading message
-    const loadingMessageId = addLoadingMessage();
-    scrollToBottom();
-    
-    const formData = new FormData();
-    formData.append("message", message);
-    
-    try {
-        const response = await fetch("/chat", {
-            method: "POST",
-            body: formData
-        });
-        
-        // Remove loading state
-        removeMessage(loadingMessageId);
-        
-        if (!response.ok) {
-            const errData = await response.json();
-            throw new Error(errData.detail || "Query execution failed");
-        }
-        
-        const data = await response.json();
-        
-        // Add assistant response
-        addAssistantResponse(data);
-        
-    } catch (err) {
-        console.error(err);
-        removeMessage(loadingMessageId);
-        addMessage("assistant", `⚠️ Execution failed. Details: ${err.message}`);
+    if (!fileUploaded) {
+        appendAssistantError('Please upload a dataset first before asking questions.');
+        return;
     }
-    scrollToBottom();
+
+    isLoading = true;
+    sendBtn.disabled = true;
+    chatInput.disabled = true;
+    setStatus('Thinking…', 'blue');
+
+    // User bubble
+    appendUserMessage(message);
+
+    // Loading indicator
+    const loadingId = appendLoadingMessage();
+    scrollBottom();
+
+    const formData = new FormData();
+    formData.append('message', message);
+
+    try {
+        const res = await fetch('/chat', { method: 'POST', body: formData });
+
+        removeElement(loadingId);
+
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: 'Query failed' }));
+            throw new Error(err.detail || 'Query execution failed');
+        }
+
+        const data = await res.json();
+        renderAssistantResponse(data);
+        setStatus('Ready', 'green');
+
+    } catch (err) {
+        console.error('[Chat Error]', err);
+        removeElement(loadingId);
+        appendAssistantError(`Request failed: ${err.message}`);
+        setStatus('Error — ready for next query', 'green');
+    } finally {
+        isLoading = false;
+        sendBtn.disabled = false;
+        chatInput.disabled = false;
+        chatInput.focus();
+        scrollBottom();
+    }
 }
 
-// Render message helper
-function addMessage(role, content) {
-    const msg = document.createElement("div");
-    msg.className = `message ${role}`;
-    
-    const avatarSvg = role === "assistant" 
-        ? `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: #60a5fa; filter: drop-shadow(0 0 6px rgba(96, 165, 250, 0.6));"><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/><circle cx="12" cy="12" r="4"/></svg>`
-        : `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: #a3a3a3;"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`;
-    
+// ════════════════════════════
+// RENDER HELPERS
+// ════════════════════════════
+
+function appendUserMessage(text) {
+    const msg = document.createElement('div');
+    msg.className = 'message user';
+    msg.setAttribute('role', 'listitem');
     msg.innerHTML = `
-        <div class="avatar">${avatarSvg}</div>
-        <div class="message-content">
-            <p>${content}</p>
-        </div>
+        ${userAvatarSvg()}
+        <div class="msg-bubble">${escHtml(text)}</div>
     `;
-    
     chatMessages.appendChild(msg);
-    scrollToBottom();
+    scrollBottom();
+}
+
+function appendAssistantMessage(html) {
+    const msg = document.createElement('div');
+    msg.className = 'message assistant';
+    msg.setAttribute('role', 'listitem');
+    msg.innerHTML = `
+        ${aiAvatarSvg()}
+        <div class="msg-bubble">${html}</div>
+    `;
+    chatMessages.appendChild(msg);
+    scrollBottom();
     return msg;
 }
 
-// Add loading dots
-function addLoadingMessage() {
-    const id = "loading-" + Date.now();
-    const msg = document.createElement("div");
-    msg.className = "message assistant";
-    msg.id = id;
-    
-    const avatarSvg = `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: #60a5fa; filter: drop-shadow(0 0 6px rgba(96, 165, 250, 0.6));"><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/><circle cx="12" cy="12" r="4"/></svg>`;
-    
+function appendAssistantError(text) {
+    const msg = document.createElement('div');
+    msg.className = 'message assistant';
+    msg.setAttribute('role', 'listitem');
     msg.innerHTML = `
-        <div class="avatar">${avatarSvg}</div>
-        <div class="message-content">
-            <div class="chat-loading">
-                <div class="loading-dot"></div>
-                <div class="loading-dot"></div>
-                <div class="loading-dot"></div>
+        ${aiAvatarSvg()}
+        <div class="msg-bubble">
+            <div class="error-box">${escHtml(text)}</div>
+        </div>
+    `;
+    chatMessages.appendChild(msg);
+    scrollBottom();
+}
+
+function appendLoadingMessage() {
+    const id = 'loading-' + Date.now();
+    const msg = document.createElement('div');
+    msg.id = id;
+    msg.className = 'message assistant';
+    msg.setAttribute('role', 'listitem');
+    msg.setAttribute('aria-label', 'Sankhya is thinking');
+    msg.innerHTML = `
+        ${aiAvatarSvg()}
+        <div class="msg-bubble">
+            <div class="thinking-row">
+                <span class="thinking-label">Analyzing</span>
+                <div class="dot-pulse" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                </div>
             </div>
         </div>
     `;
-    
     chatMessages.appendChild(msg);
     return id;
 }
 
-function removeMessage(id) {
+function renderAssistantResponse(data) {
+    const msg = document.createElement('div');
+    msg.className = 'message assistant';
+    msg.setAttribute('role', 'listitem');
+
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+
+    // ── Explanation text ──
+    if (data.explanation) {
+        const p = document.createElement('p');
+        p.innerHTML = mdToHtml(data.explanation);
+        bubble.appendChild(p);
+    }
+
+    // ── Error notice ──
+    if (data.status === 'error' && data.error) {
+        const errBox = document.createElement('div');
+        errBox.className = 'error-box';
+        errBox.textContent = 'Execution encountered an issue. The explanation above should help clarify what happened.';
+        bubble.appendChild(errBox);
+    }
+
+    // ── Tabular result ──
+    if (data.answer && data.answer.type === 'table') {
+        const { columns, records } = data.answer;
+        const displayRows = records.slice(0, 15);
+
+        const wrap = document.createElement('div');
+        wrap.className = 'result-table-wrap';
+
+        const table = document.createElement('table');
+        table.className = 'result-table';
+        table.setAttribute('role', 'table');
+
+        // Header
+        const thead = document.createElement('thead');
+        const trHead = document.createElement('tr');
+        trHead.setAttribute('role', 'row');
+        columns.forEach(col => {
+            const th = document.createElement('th');
+            th.setAttribute('role', 'columnheader');
+            th.setAttribute('scope', 'col');
+            th.textContent = col;
+            trHead.appendChild(th);
+        });
+        thead.appendChild(trHead);
+        table.appendChild(thead);
+
+        // Body
+        const tbody = document.createElement('tbody');
+        displayRows.forEach(rec => {
+            const tr = document.createElement('tr');
+            tr.setAttribute('role', 'row');
+            columns.forEach(col => {
+                const td = document.createElement('td');
+                td.setAttribute('role', 'cell');
+                const val = rec[col];
+                td.textContent = val === null || val === undefined ? '—' : formatValue(val);
+                tr.appendChild(td);
+            });
+            tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        wrap.appendChild(table);
+        bubble.appendChild(wrap);
+
+        if (records.length > 15) {
+            const caption = document.createElement('div');
+            caption.className = 'table-caption';
+            caption.textContent = `Showing ${displayRows.length} of ${records.length} rows`;
+            bubble.appendChild(caption);
+        }
+    }
+
+    // ── Text / scalar result ──
+    if (data.answer && data.answer.type === 'text' && data.answer.value && data.answer.value !== 'None') {
+        const raw = data.answer.value.trim();
+
+        // Try to parse as a dict → key-value grid
+        const parsed = tryParseDict(raw);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            const grid = document.createElement('div');
+            grid.className = 'kv-grid';
+
+            Object.entries(parsed).forEach(([k, v]) => {
+                const item = document.createElement('div');
+                item.className = 'kv-item';
+
+                const key = document.createElement('div');
+                key.className = 'kv-key';
+                key.textContent = k;
+
+                const val = document.createElement('div');
+                val.className = 'kv-val';
+                val.textContent = (typeof v === 'object' && v !== null) ? JSON.stringify(v) : String(v);
+
+                item.appendChild(key);
+                item.appendChild(val);
+                grid.appendChild(item);
+            });
+
+            bubble.appendChild(grid);
+        } else {
+            // Raw text/number result box
+            const box = document.createElement('div');
+            box.className = 'text-result';
+            box.textContent = raw;
+            bubble.appendChild(box);
+        }
+    }
+
+    // ── Matplotlib image ──
+    if (data.image) {
+        const img = document.createElement('img');
+        img.className = 'plot-img';
+        img.src = `data:image/png;base64,${data.image}`;
+        img.alt = 'Generated data visualization';
+        bubble.appendChild(img);
+    }
+
+    // ── Plotly chart ──
+    if (data.chart) {
+        const chartId = 'chart-' + Date.now();
+        const chartDiv = document.createElement('div');
+        chartDiv.id = chartId;
+        chartDiv.className = 'chart-container';
+        bubble.appendChild(chartDiv);
+
+        // Dark theme overrides
+        const layout = Object.assign({}, data.chart.layout || {});
+        layout.paper_bgcolor = 'rgba(0,0,0,0)';
+        layout.plot_bgcolor  = 'rgba(0,0,0,0)';
+        layout.font = { color: '#f1f5f9', family: 'Inter, system-ui, sans-serif', size: 12 };
+        layout.margin = layout.margin || { t: 40, b: 40, l: 50, r: 20 };
+
+        const axisStyle = {
+            gridcolor: 'rgba(255,255,255,0.05)',
+            linecolor: 'rgba(255,255,255,0.08)',
+            tickcolor: 'rgba(255,255,255,0.15)',
+            tickfont:  { color: '#94a3b8', size: 11 },
+            zerolinecolor: 'rgba(255,255,255,0.07)',
+        };
+
+        if (layout.xaxis) Object.assign(layout.xaxis, axisStyle);
+        else layout.xaxis = axisStyle;
+
+        if (layout.yaxis) Object.assign(layout.yaxis, axisStyle);
+        else layout.yaxis = axisStyle;
+
+        if (layout.legend) {
+            layout.legend.bgcolor = 'rgba(0,0,0,0)';
+            layout.legend.font = { color: '#94a3b8', size: 11 };
+        }
+
+        // Colorize traces with nice palette
+        const palette = ['#818cf8','#06b6d4','#10b981','#f59e0b','#f43f5e','#a78bfa','#38bdf8'];
+        if (data.chart.data) {
+            data.chart.data.forEach((trace, i) => {
+                if (!trace.marker) trace.marker = {};
+                if (!trace.marker.color || typeof trace.marker.color === 'string') {
+                    trace.marker.color = palette[i % palette.length];
+                }
+                if (trace.type === 'scatter' || trace.type === 'scattergl') {
+                    if (!trace.line) trace.line = {};
+                    trace.line.color = trace.line.color || palette[i % palette.length];
+                }
+            });
+        }
+
+        setTimeout(() => {
+            try {
+                Plotly.newPlot(chartId, data.chart.data, layout, {
+                    responsive: true,
+                    displayModeBar: true,
+                    modeBarButtonsToRemove: ['lasso2d','select2d'],
+                    toImageButtonOptions: { format: 'png', scale: 2 }
+                });
+            } catch (e) {
+                console.error('[Plotly]', e);
+                const fallback = document.createElement('div');
+                fallback.className = 'error-box';
+                fallback.textContent = 'Could not render chart: ' + e.message;
+                chartDiv.replaceWith(fallback);
+            }
+        }, 80);
+    }
+
+    // ── Code inspector (collapsible) ──
+    if (data.code) {
+        const inspector = document.createElement('div');
+        inspector.className = 'code-inspector';
+
+        const toggle = document.createElement('button');
+        toggle.className = 'inspector-toggle';
+        toggle.setAttribute('aria-expanded', 'false');
+        toggle.setAttribute('aria-controls', 'inspector-body-' + Date.now());
+        toggle.innerHTML = `
+            <span>View executed code</span>
+            <svg class="inspector-toggle-icon" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                <polyline points="4 6 8 10 12 6"/>
+            </svg>
+        `;
+
+        const body = document.createElement('div');
+        body.className = 'inspector-body hidden';
+        body.textContent = data.code;
+
+        toggle.addEventListener('click', () => {
+            const isOpen = !body.classList.contains('hidden');
+            body.classList.toggle('hidden', isOpen);
+            toggle.setAttribute('aria-expanded', String(!isOpen));
+            toggle.querySelector('.inspector-toggle-icon').classList.toggle('open', !isOpen);
+        });
+
+        inspector.appendChild(toggle);
+        inspector.appendChild(body);
+        bubble.appendChild(inspector);
+    }
+
+    msg.innerHTML = aiAvatarSvg();
+    msg.appendChild(bubble);
+    chatMessages.appendChild(msg);
+    scrollBottom();
+}
+
+// ════════════════════════════
+// AVATAR SVGS
+// ════════════════════════════
+
+function aiAvatarSvg() {
+    return `<div class="msg-avatar" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M12 3c0 0-5 3.5-5 9s5 9 5 9 5-3.5 5-9-5-9-5-9z"/>
+            <ellipse cx="12" cy="12" rx="8" ry="4"/>
+        </svg>
+    </div>`;
+}
+
+function userAvatarSvg() {
+    return `<div class="msg-avatar" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+            <circle cx="12" cy="7" r="4"/>
+        </svg>
+    </div>`;
+}
+
+// ════════════════════════════
+// UTILITIES
+// ════════════════════════════
+
+function scrollBottom() {
+    requestAnimationFrame(() => {
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    });
+}
+
+function removeElement(id) {
     const el = document.getElementById(id);
     if (el) el.remove();
 }
 
-// Custom assistant response layout
-function addAssistantResponse(data) {
-    const msg = document.createElement("div");
-    msg.className = "message assistant";
-    
-    const container = document.createElement("div");
-    container.className = "message-content";
-    
-    // Add text explanation
-    const textEl = document.createElement("p");
-    textEl.innerHTML = data.explanation.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-    container.appendChild(textEl);
-    
-    // Check if table answer exists
-    if (data.answer && data.answer.type === "table") {
-        const tableWrapper = document.createElement("div");
-        tableWrapper.className = "results-table-container";
-        
-        const table = document.createElement("table");
-        table.className = "results-table";
-        
-        // Build headers
-        const trHeaders = document.createElement("tr");
-        data.answer.columns.forEach(col => {
-            const th = document.createElement("th");
-            th.textContent = col;
-            trHeaders.appendChild(th);
-        });
-        table.appendChild(trHeaders);
-        
-        // Build rows (limit to 10 rows for safety)
-        const displayRecords = data.answer.records.slice(0, 10);
-        displayRecords.forEach(rec => {
-            const tr = document.createElement("tr");
-            data.answer.columns.forEach(col => {
-                const td = document.createElement("td");
-                td.textContent = rec[col] === null ? "null" : rec[col];
-                tr.appendChild(td);
-            });
-            table.appendChild(tr);
-        });
-        
-        tableWrapper.appendChild(table);
-        container.appendChild(tableWrapper);
-        
-        if (data.answer.records.length > 10) {
-            const caption = document.createElement("caption");
-            caption.style.fontSize = "11px";
-            caption.style.color = "var(--text-muted)";
-            caption.style.display = "block";
-            caption.style.padding = "4px 8px";
-            caption.textContent = `* Showing top 10 rows of ${data.answer.records.length} records`;
-            container.appendChild(caption);
-        }
-    } else if (data.answer && data.answer.type === "text" && data.answer.value !== "None") {
-        let isObj = false;
-        let objVal = null;
-        let strVal = data.answer.value.trim();
-        
-        if (strVal.startsWith("{") && strVal.endsWith("}")) {
-            try {
-                objVal = JSON.parse(strVal);
-                isObj = true;
-            } catch (e) {
-                try {
-                    let cleanStr = strVal
-                        .replace(/'/g, '"')
-                        .replace(/\(/g, '[')
-                        .replace(/\)/g, ']')
-                        .replace(/True/g, 'true')
-                        .replace(/False/g, 'false')
-                        .replace(/None/g, 'null');
-                    objVal = JSON.parse(cleanStr);
-                    isObj = true;
-                } catch (err) {
-                    isObj = false;
-                }
-            }
-        }
-        
-        if (isObj && objVal && typeof objVal === "object") {
-            const listContainer = document.createElement("div");
-            listContainer.className = "kv-container";
-            
-            for (let [key, val] of Object.entries(objVal)) {
-                const item = document.createElement("div");
-                item.className = "kv-item";
-                
-                const keyEl = document.createElement("span");
-                keyEl.className = "kv-key";
-                keyEl.textContent = key;
-                
-                const valEl = document.createElement("span");
-                valEl.className = "kv-value";
-                if (typeof val === "object" && val !== null) {
-                    valEl.textContent = JSON.stringify(val);
-                } else {
-                    valEl.textContent = String(val);
-                }
-                
-                item.appendChild(keyEl);
-                item.appendChild(valEl);
-                listContainer.appendChild(item);
-            }
-            container.appendChild(listContainer);
-        } else {
-            const valueBox = document.createElement("div");
-            valueBox.style.background = "rgba(255, 255, 255, 0.03)";
-            valueBox.style.padding = "10px";
-            valueBox.style.border = "1px solid var(--border-color)";
-            valueBox.style.borderRadius = "6px";
-            valueBox.style.fontFamily = "monospace";
-            valueBox.style.fontSize = "13px";
-            valueBox.style.color = "var(--accent-gold)";
-            valueBox.style.margin = "10px 0";
-            valueBox.style.whiteSpace = "pre-wrap";
-            valueBox.textContent = data.answer.value;
-            container.appendChild(valueBox);
-        }
-    }
-    
-    // Check if Matplotlib base64 image exists
-    if (data.image) {
-        const img = document.createElement("img");
-        img.src = `data:image/png;base64,${data.image}`;
-        img.style.width = "100%";
-        img.style.borderRadius = "12px";
-        img.style.border = "1px solid var(--border-color)";
-        img.style.boxShadow = "0 10px 30px rgba(0, 0, 0, 0.25)";
-        img.style.margin = "16px 0";
-        img.style.display = "block";
-        container.appendChild(img);
-    }
-    
-    // Check if Plotly chart exists
-    if (data.chart) {
-        const chartId = "chart-" + Date.now();
-        const chartDiv = document.createElement("div");
-        chartDiv.id = chartId;
-        chartDiv.className = "embedded-chart";
-        container.appendChild(chartDiv);
-        
-        // Force dark styling on chart layout properties
-        const chartLayout = data.chart.layout || {};
-        chartLayout.paper_bgcolor = "rgba(0,0,0,0)";
-        chartLayout.plot_bgcolor = "rgba(0,0,0,0)";
-        chartLayout.font = { color: "#F3F4F6", family: 'Outfit' };
-        
-        // Adjust scales/gridcolors to show cleanly on dark bg
-        if (chartLayout.xaxis) {
-            chartLayout.xaxis.gridcolor = "rgba(255,255,255,0.06)";
-            chartLayout.xaxis.linecolor = "rgba(255,255,255,0.1)";
-        }
-        if (chartLayout.yaxis) {
-            chartLayout.yaxis.gridcolor = "rgba(255,255,255,0.06)";
-            chartLayout.yaxis.linecolor = "rgba(255,255,255,0.1)";
-        }
-        
-        // Plot chart using CDN Plotly library
-        setTimeout(() => {
-            try {
-                Plotly.newPlot(chartId, data.chart.data, chartLayout, { responsive: true, displayModeBar: false });
-            } catch (err) {
-                console.error("Plotly render error: ", err);
-            }
-        }, 100);
-    }
-    
-    // Code Inspector panel
-    if (data.code) {
-        const inspector = document.createElement("div");
-        inspector.className = "code-inspector";
-        
-        const header = document.createElement("div");
-        header.className = "inspector-header";
-        header.innerHTML = `<span>⚙️ Executed Calculations Code</span><span>▼</span>`;
-        
-        const body = document.createElement("div");
-        body.className = "inspector-body hidden";
-        body.textContent = data.code;
-        
-        header.addEventListener("click", () => {
-            body.classList.toggle("hidden");
-            header.children[1].textContent = body.classList.contains("hidden") ? "▼" : "▲";
-        });
-        
-        inspector.appendChild(header);
-        inspector.appendChild(body);
-        container.appendChild(inspector);
-    }
-    
-    const avatarSvg = `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color: #60a5fa; filter: drop-shadow(0 0 6px rgba(96, 165, 250, 0.6));"><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/><circle cx="12" cy="12" r="4"/></svg>`;
-    msg.innerHTML = `<div class="avatar">${avatarSvg}</div>`;
-    msg.appendChild(container);
-    
-    chatMessages.appendChild(msg);
-    scrollToBottom();
+function escHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
-function scrollToBottom() {
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+/** Minimal markdown → html (bold, italic, inline code) */
+function mdToHtml(text) {
+    return escHtml(text)
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.*?)\*/g,     '<em>$1</em>')
+        .replace(/`(.*?)`/g,       '<code style="font-family:var(--font-mono);font-size:12px;color:#a5b4fc;background:rgba(129,140,248,0.1);padding:1px 5px;border-radius:4px;">$1</code>')
+        .replace(/\n/g, '<br>');
+}
+
+/** Try to parse Python-dict-like strings as JSON */
+function tryParseDict(str) {
+    if (!str.startsWith('{') || !str.endsWith('}')) return null;
+    try { return JSON.parse(str); } catch (_) {}
+    try {
+        return JSON.parse(
+            str.replace(/'/g, '"')
+               .replace(/True/g, 'true')
+               .replace(/False/g, 'false')
+               .replace(/None/g, 'null')
+               .replace(/\((\d+),\s*(\d+)\)/g, '[$1,$2]')
+               .replace(/datetime\.dtype\('([^']+)'\)/g, '"$1"')
+        );
+    } catch (_) { return null; }
+}
+
+/** Format numeric values for display */
+function formatValue(val) {
+    if (val === null || val === undefined) return '—';
+    if (typeof val === 'number') {
+        if (!isFinite(val)) return String(val);
+        if (Math.abs(val) >= 1e6 || (Math.abs(val) < 0.001 && val !== 0)) {
+            return val.toExponential(3);
+        }
+        if (Number.isInteger(val)) return val.toLocaleString();
+        return parseFloat(val.toFixed(4)).toString();
+    }
+    return String(val);
 }

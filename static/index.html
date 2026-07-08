@@ -3,94 +3,216 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sankhya: AI Data Analyst & Copilot</title>
-    <!-- Outfit Font from Google Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <!-- Plotly.js CDN -->
+    <title>Sankhya — AI Data Intelligence Platform</title>
+    <meta name="description" content="Sankhya is an AI-powered data analyst. Upload your dataset and ask anything — from statistics to visualizations, correlations to predictions.">
+    <!-- Google Fonts: Inter + JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <!-- Plotly.js -->
     <script src="https://cdn.plot.ly/plotly-2.29.0.min.js"></script>
     <!-- Stylesheet -->
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <div class="app-container">
-        <!-- Sidebar -->
-        <aside class="sidebar">
+    <div class="app-shell">
+
+        <!-- ══════════ SIDEBAR ══════════ -->
+        <aside class="sidebar" role="complementary" aria-label="Data controls">
+
+            <!-- Brand -->
             <div class="brand">
-                <span class="brand-emoji">🔮</span>
+                <div class="brand-icon" aria-hidden="true">
+                    <svg viewBox="0 0 32 32" width="32" height="32" fill="none">
+                        <circle cx="16" cy="16" r="15" stroke="url(#brand-grad)" stroke-width="1.5"/>
+                        <path d="M16 5c0 0-7 4-7 11s7 11 7 11 7-4 7-11S16 5 16 5z" stroke="url(#brand-grad)" stroke-width="1.5" fill="none"/>
+                        <ellipse cx="16" cy="16" rx="9" ry="5.5" stroke="url(#brand-grad)" stroke-width="1.2" fill="none"/>
+                        <circle cx="16" cy="16" r="2.5" fill="url(#brand-grad)"/>
+                        <defs>
+                            <linearGradient id="brand-grad" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+                                <stop offset="0%" stop-color="#818cf8"/>
+                                <stop offset="100%" stop-color="#06b6d4"/>
+                            </linearGradient>
+                        </defs>
+                    </svg>
+                </div>
                 <div class="brand-text">
-                    <h1>Sankhya</h1>
-                    <p>AI Data Philosopher</p>
+                    <span class="brand-name">Sankhya</span>
+                    <span class="brand-tagline">AI Data Intelligence</span>
                 </div>
             </div>
-            
-            <div class="divider"></div>
 
-            <!-- Upload Area -->
-            <div class="section-title">Upload Dataset</div>
-            <div id="drop-zone" class="upload-box">
-                <div class="upload-icon">📤</div>
-                <div class="upload-text">
-                    <p class="main-text">Drag & Drop file</p>
-                    <p class="sub-text">Supports CSV, Excel, JSON</p>
-                </div>
-                <input type="file" id="file-input" accept=".csv,.xlsx,.xls,.json" hidden>
-            </div>
+            <div class="sidebar-divider"></div>
 
-            <!-- Dataset Metadata (hidden initially) -->
-            <div id="dataset-info" class="dataset-info hidden">
-                <div class="dataset-meta-item">
-                    <span class="label">File:</span>
-                    <span id="meta-filename" class="value">housing.csv</span>
+            <!-- Dataset Upload -->
+            <section class="sidebar-section" aria-label="Upload dataset">
+                <h2 class="section-label">Dataset</h2>
+                <div
+                    id="drop-zone"
+                    class="upload-zone"
+                    role="button"
+                    tabindex="0"
+                    aria-label="Upload dataset — drag and drop or click to browse"
+                    aria-describedby="upload-hint"
+                >
+                    <div class="upload-icon-wrap" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                    </div>
+                    <p class="upload-main">Drop file here</p>
+                    <p class="upload-hint" id="upload-hint">CSV · Excel · JSON</p>
+                    <input type="file" id="file-input" accept=".csv,.xlsx,.xls,.json" hidden aria-label="Choose dataset file">
                 </div>
-                <div class="dataset-meta-item">
-                    <span class="label">Rows / Columns:</span>
-                    <span id="meta-shape" class="value">500 x 14</span>
+            </section>
+
+            <!-- Dataset Metadata (shown after upload) -->
+            <section id="dataset-info" class="sidebar-section hidden" aria-label="Dataset information" aria-live="polite">
+                <h2 class="section-label">Loaded Dataset</h2>
+
+                <div class="meta-cards">
+                    <div class="meta-card">
+                        <span class="meta-icon" aria-hidden="true">
+                            <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M13 2H6a2 2 0 0 0-2 2v16l4-2 4 2 4-2V4a2 2 0 0 0-2-2z"/>
+                            </svg>
+                        </span>
+                        <div class="meta-label">File</div>
+                        <div id="meta-filename" class="meta-value" title="">—</div>
+                    </div>
+                    <div class="meta-card">
+                        <span class="meta-icon" aria-hidden="true">
+                            <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                <rect x="3" y="3" width="14" height="14" rx="2"/>
+                                <line x1="3" y1="9" x2="17" y2="9"/>
+                                <line x1="9" y1="3" x2="9" y2="17"/>
+                            </svg>
+                        </span>
+                        <div class="meta-label">Shape</div>
+                        <div id="meta-shape" class="meta-value">—</div>
+                    </div>
                 </div>
-                
-                <div class="divider"></div>
-                <div class="section-title">Columns list</div>
-                <div id="columns-list" class="columns-list">
-                    <!-- Dynamic column tokens will go here -->
+
+                <div class="sidebar-divider"></div>
+                <h2 class="section-label">Columns</h2>
+                <div id="columns-list" class="columns-list" role="list" aria-label="Column names"></div>
+            </section>
+
+            <!-- Sidebar footer: model badge -->
+            <div class="sidebar-footer">
+                <div class="model-badge">
+                    <span class="model-dot" aria-hidden="true"></span>
+                    <span>LLaMA 3.3 · 70B</span>
                 </div>
             </div>
         </aside>
 
-        <!-- Main Content Area -->
-        <main class="main-panel">
-            <!-- Top bar -->
-            <header class="topbar">
-                <div class="status-indicator">
-                    <span class="pulse-dot green"></span>
-                    <span id="status-text">Ready — Upload a file to begin</span>
+        <!-- ══════════ MAIN PANEL ══════════ -->
+        <main class="main-panel" role="main">
+
+            <!-- Topbar -->
+            <header class="topbar" role="banner">
+                <div class="topbar-left">
+                    <div class="status-pill" id="status-pill">
+                        <span class="status-dot green" id="status-dot" aria-hidden="true"></span>
+                        <span id="status-text" class="status-text">Ready — upload a dataset to begin</span>
+                    </div>
+                </div>
+                <div class="topbar-right">
+                    <div class="topbar-badge" aria-label="Powered by Groq API">
+                        <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+                        </svg>
+                        Groq Powered
+                    </div>
                 </div>
             </header>
 
             <!-- Chat Area -->
-            <div class="chat-container">
-                <div id="chat-messages" class="chat-messages">
-                    <!-- Welcome message -->
-                    <div class="message assistant">
-                        <div class="avatar">🔮</div>
-                        <div class="message-content">
-                            <p>Namaste! I am <strong>Sankhya</strong>, your AI Data Companion. Upload your dataset on the left panel, and ask me to analyze it, impute missing values, run predictive models, or plot interactive charts!</p>
+            <div class="chat-area">
+                <div id="chat-messages" class="messages-list" role="log" aria-live="polite" aria-label="Conversation">
+                    <!-- Welcome state -->
+                    <div class="welcome-state" id="welcome-state">
+                        <div class="welcome-orb" aria-hidden="true">
+                            <svg viewBox="0 0 64 64" width="64" height="64" fill="none">
+                                <circle cx="32" cy="32" r="30" stroke="url(#orb-g)" stroke-width="1.5" opacity="0.6"/>
+                                <path d="M32 8c0 0-16 9-16 24s16 24 16 24 16-9 16-24S32 8 32 8z" stroke="url(#orb-g)" stroke-width="1.5" fill="none"/>
+                                <ellipse cx="32" cy="32" rx="20" ry="11" stroke="url(#orb-g)" stroke-width="1.2" fill="none"/>
+                                <circle cx="32" cy="32" r="5" fill="url(#orb-g)" opacity="0.9"/>
+                                <defs>
+                                    <linearGradient id="orb-g" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+                                        <stop offset="0%" stop-color="#818cf8"/>
+                                        <stop offset="100%" stop-color="#06b6d4"/>
+                                    </linearGradient>
+                                </defs>
+                            </svg>
+                        </div>
+                        <h1 class="welcome-title">Namaste, I am Sankhya</h1>
+                        <p class="welcome-sub">Your AI data intelligence companion. Upload a dataset on the left and ask me anything — statistics, visualizations, predictions, or correlations.</p>
+                        <div class="welcome-features" aria-label="Capabilities">
+                            <div class="feature-pill">
+                                <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v10h10M7 9l2-4 2 4 2-2"/></svg>
+                                Visualizations
+                            </div>
+                            <div class="feature-pill">
+                                <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 5v3l2 2"/></svg>
+                                Statistics
+                            </div>
+                            <div class="feature-pill">
+                                <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12l5-5 3 3 4-6"/></svg>
+                                Predictions
+                            </div>
+                            <div class="feature-pill">
+                                <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>
+                                Correlations
+                            </div>
                         </div>
                     </div>
                 </div>
 
-                <!-- Suggestions chips -->
-                <div id="suggestions" class="suggestions hidden">
-                    <button class="chip" onclick="sendSuggestion('Show data summary and head overview')">📊 Show Overview</button>
-                    <button class="chip" onclick="sendSuggestion('Plot a correlation heatmap of numeric columns')">📈 Correlation Heatmap</button>
-                    <button class="chip" onclick="sendSuggestion('Identify missing values in the columns')">🔍 Missing Values</button>
+                <!-- Suggestions row -->
+                <div id="suggestions" class="suggestions hidden" role="group" aria-label="Suggested queries">
+                    <button class="chip" onclick="sendSuggestion('Show a complete summary and overview of the dataset')" aria-label="Show dataset summary">
+                        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="2"/><line x1="5" y1="6" x2="11" y2="6"/><line x1="5" y1="9" x2="9" y2="9"/></svg>
+                        Overview
+                    </button>
+                    <button class="chip" onclick="sendSuggestion('Plot a correlation heatmap of all numeric columns')" aria-label="Correlation heatmap">
+                        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v10h10M7 9l2-4 2 4 2-2"/></svg>
+                        Heatmap
+                    </button>
+                    <button class="chip" onclick="sendSuggestion('Find and report all missing values with percentage per column')" aria-label="Missing values report">
+                        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><line x1="8" y1="5" x2="8" y2="8"/><circle cx="8" cy="11" r="0.5" fill="currentColor"/></svg>
+                        Missing Values
+                    </button>
+                    <button class="chip" onclick="sendSuggestion('Show the distribution of all numeric columns as a histogram')" aria-label="Distribution plots">
+                        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="9" width="3" height="5"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11" y="2" width="3" height="12"/></svg>
+                        Distributions
+                    </button>
+                    <button class="chip" onclick="sendSuggestion('Show the top 5 rows of the dataset')" aria-label="Show head">
+                        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="2" y1="4" x2="14" y2="4"/><line x1="2" y1="8" x2="14" y2="8"/><line x1="2" y1="12" x2="10" y2="12"/></svg>
+                        Head
+                    </button>
                 </div>
 
-                <!-- Chat Input Section -->
-                <div class="input-panel">
-                    <form id="chat-form" class="chat-form">
-                        <input type="text" id="chat-input" placeholder="Ask Sankhya to analyze your data..." disabled autocomplete="off">
-                        <button type="submit" id="send-btn" disabled>
-                            <svg viewBox="0 0 24 24" class="send-icon">
-                                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                <!-- Input row -->
+                <div class="input-row">
+                    <form id="chat-form" class="input-form" autocomplete="off">
+                        <label for="chat-input" class="sr-only">Ask Sankhya about your data</label>
+                        <input
+                            type="text"
+                            id="chat-input"
+                            class="chat-input"
+                            placeholder="Ask anything about your data…"
+                            disabled
+                            autocomplete="off"
+                            aria-label="Message input"
+                        >
+                        <button type="submit" id="send-btn" class="send-btn" disabled aria-label="Send message">
+                            <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <line x1="10" y1="3" x2="10" y2="17"/>
+                                <polyline points="4 9 10 3 16 9"/>
                             </svg>
                         </button>
                     </form>
@@ -99,7 +221,6 @@
         </main>
     </div>
 
-    <!-- Script -->
     <script src="app.js"></script>
 </body>
 </html>
