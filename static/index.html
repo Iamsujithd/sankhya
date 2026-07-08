@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sankhya: AI Data Analyst & Copilot</title>
+    <!-- Outfit Font from Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Plotly.js CDN -->
+    <script src="https://cdn.plot.ly/plotly-2.29.0.min.js"></script>
+    <!-- Stylesheet -->
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="brand">
+                <span class="brand-emoji">🔮</span>
+                <div class="brand-text">
+                    <h1>Sankhya</h1>
+                    <p>AI Data Philosopher</p>
+                </div>
+            </div>
+            
+            <div class="divider"></div>
+
+            <!-- Upload Area -->
+            <div class="section-title">Upload Dataset</div>
+            <div id="drop-zone" class="upload-box">
+                <div class="upload-icon">📤</div>
+                <div class="upload-text">
+                    <p class="main-text">Drag & Drop file</p>
+                    <p class="sub-text">Supports CSV, Excel, JSON</p>
+                </div>
+                <input type="file" id="file-input" accept=".csv,.xlsx,.xls,.json" hidden>
+            </div>
+
+            <!-- Dataset Metadata (hidden initially) -->
+            <div id="dataset-info" class="dataset-info hidden">
+                <div class="dataset-meta-item">
+                    <span class="label">File:</span>
+                    <span id="meta-filename" class="value">housing.csv</span>
+                </div>
+                <div class="dataset-meta-item">
+                    <span class="label">Rows / Columns:</span>
+                    <span id="meta-shape" class="value">500 x 14</span>
+                </div>
+                
+                <div class="divider"></div>
+                <div class="section-title">Columns list</div>
+                <div id="columns-list" class="columns-list">
+                    <!-- Dynamic column tokens will go here -->
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <main class="main-panel">
+            <!-- Top bar -->
+            <header class="topbar">
+                <div class="status-indicator">
+                    <span class="pulse-dot green"></span>
+                    <span id="status-text">Ready — Upload a file to begin</span>
+                </div>
+            </header>
+
+            <!-- Chat Area -->
+            <div class="chat-container">
+                <div id="chat-messages" class="chat-messages">
+                    <!-- Welcome message -->
+                    <div class="message assistant">
+                        <div class="avatar">🔮</div>
+                        <div class="message-content">
+                            <p>Namaste! I am <strong>Sankhya</strong>, your AI Data Companion. Upload your dataset on the left panel, and ask me to analyze it, impute missing values, run predictive models, or plot interactive charts!</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Suggestions chips -->
+                <div id="suggestions" class="suggestions hidden">
+                    <button class="chip" onclick="sendSuggestion('Show data summary and head overview')">📊 Show Overview</button>
+                    <button class="chip" onclick="sendSuggestion('Plot a correlation heatmap of numeric columns')">📈 Correlation Heatmap</button>
+                    <button class="chip" onclick="sendSuggestion('Identify missing values in the columns')">🔍 Missing Values</button>
+                </div>
+
+                <!-- Chat Input Section -->
+                <div class="input-panel">
+                    <form id="chat-form" class="chat-form">
+                        <input type="text" id="chat-input" placeholder="Ask Sankhya to analyze your data..." disabled autocomplete="off">
+                        <button type="submit" id="send-btn" disabled>
+                            <svg viewBox="0 0 24 24" class="send-icon">
+                                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                            </svg>
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Script -->
+    <script src="app.js"></script>
+</body>
+</html>
