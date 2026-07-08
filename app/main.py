@@ -107,257 +107,193 @@ async def upload_file(file: UploadFile = File(...)):
 async def chat_with_data(message: str = Form(...)):
 
     if GROQ_API_KEY == "missing_key":
-        raise HTTPException(status_code=400, detail="GROQ_API_KEY environment variable is not configured! Please set it before running queries.")
+        raise HTTPException(status_code=400, detail="GROQ_API_KEY environment variable is not configured.")
     if "df" not in store:
-        raise HTTPException(status_code=400, detail="No dataset uploaded yet. Please upload a dataset first!")
-    
-    df = store["df"]
+        raise HTTPException(status_code=400, detail="No dataset uploaded yet. Please upload a dataset first.")
+
+    df       = store["df"]
     filename = store.get("filename", "uploaded file")
     cols_info = ", ".join([f"{col} ({dtype})" for col, dtype in zip(df.columns, df.dtypes)])
-    
-    # Detect available sklearn for ML queries
+
     try:
         import sklearn  # noqa
         sklearn_available = True
     except ImportError:
         sklearn_available = False
 
-    # Build column sample values for richer context
     sample_vals = {}
-    for col in df.columns[:8]:
-        vals = df[col].dropna().head(3).tolist()
-        sample_vals[col] = vals
+    for col in df.columns[:10]:
+        sample_vals[col] = df[col].dropna().head(3).tolist()
 
-    try:
-        # ══════════════════════════════════════════════════════════════════
-        # STEP 1: COMBINED CLASSIFIER + CHAT RESPONSE (single LLM call)
-        # The model classifies the intent AND generates the reply in one
-        # shot — eliminating the extra round-trip for CHAT queries.
-        # ══════════════════════════════════════════════════════════════════
-        combined_prompt = f"""You are Sankhya — an expert AI data companion.
-The user has loaded a dataset: "{filename}" with {df.shape[0]} rows × {df.shape[1]} columns.
-Columns & types: {cols_info}
-Sample values (first 3 per column): {sample_vals}
+    # ── SINGLE LLM CALL — model decides everything ────────────────────────
+    # Give the model full context + two clear output modes.
+    # It naturally decides based on what the user is asking for.
+    # No classifier, no rules list, no JSON overhead — just reasoning.
+    # ──────────────────────────────────────────────────────────────────────
+    system_prompt = f"""You are Sankhya — a brilliant AI data scientist and data companion.
 
-TASK: Decide whether the user's message needs Python code execution on the data, or can be answered conversationally.
-
-=== INTENT RULES ===
-Reply with intent=CODE if the user wants: computation, calculation, filtering, aggregation, statistics, plotting, visualization, ML, prediction, groupby, correlation, missing values, sorting — anything that runs on the actual data rows.
-
-Reply with intent=CHAT for everything else: greetings, general questions, advisory/opinion, concept explanations, column descriptions, capability questions, "what KPI", "what should I analyze", "who are you", "explain X", "is this good for ML?", etc.
-When in doubt → CHAT.
-
-=== OUTPUT FORMAT (strict JSON, no markdown) ===
-If CHAT: {{"intent":"CHAT","reply":"<your answer here>"}}
-If CODE: {{"intent":"CODE"}}
-
-=== CHAT GUIDELINES (only used when intent=CHAT) ===
-- Greetings: warm intro, mention what you can do with this specific dataset
-- Advisory ("what KPI?", "what to analyze?"): give expert data science advice, name actual columns
-- Column questions: describe based on dtype and sample values  
-- Concept questions: explain clearly, relate to this dataset
-- Keep reply to 2-5 sentences. Use **bold** for key terms/column names.
-- Never say you can't answer.
-
-User message: "{message}"
-
-Respond with JSON only:"""
-
-        combined_resp = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": combined_prompt}],
-            temperature=0,
-            max_tokens=512
-        )
-        raw = combined_resp.choices[0].message.content.strip()
-
-        # Parse JSON response — strip any accidental markdown wrapping
-        json_str = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=re.MULTILINE).strip()
-        try:
-            parsed = json.loads(json_str)
-        except json.JSONDecodeError:
-            # Fallback: if JSON is malformed, try to detect intent from raw text
-            is_code_fallback = '"intent":"CODE"' in raw or raw.upper().startswith('CODE')
-            parsed = {"intent": "CODE" if is_code_fallback else "CHAT", "reply": raw}
-
-        is_code = parsed.get("intent", "CHAT").upper() == "CODE"
-
-        # ══════════════════════════════════════════════════════════════════
-        # STEP 2A: CHAT PATH — reply already generated above, just return it
-        # ══════════════════════════════════════════════════════════════════
-        if not is_code:
-            reply = parsed.get("reply", "I'm ready to help — ask me anything about your dataset!")
-            return make_json_safe({
-                "status": "success",
-                "intent": "chat",
-                "code": None,
-                "explanation": reply,
-                "answer": None,
-                "chart": None,
-                "image": None,
-                "error": None
-            })
-
-
-        # ══════════════════════════════════════════════════════════════════
-        # STEP 2B: CODE PATH — generate & execute Python, then explain
-        # ══════════════════════════════════════════════════════════════════
-        code_prompt = f"""You are Sankhya — a world-class AI data scientist. The user uploaded a dataset and you must write Python code that fully and correctly answers their query.
-
-=== DATASET CONTEXT ===
-Preloaded variable: `df` (pandas DataFrame — DO NOT reload from file)
+The user has uploaded: "{filename}"
 Shape: {df.shape[0]} rows × {df.shape[1]} columns
-Columns & dtypes: {cols_info}
+Columns & types: {cols_info}
 Sample values (first 3 per column): {sample_vals}
 scikit-learn available: {sklearn_available}
 
-=== USER QUERY ===
-{message}
+You have two modes — choose naturally based on what the user needs:
 
-=== RULES ===
-1. Use the existing `df` variable. Never read from a file.
-2. For tabular output (stats, filters, groupby, aggregations), assign a DataFrame or Series to `answer`.
-3. For charts, assign a Plotly figure to `fig` using `px` or `go`.
-   - NEVER use `px.dataframe`, `px.table`, or `go.Table` — assign data to `answer` instead.
-   - Heatmap: `fig = px.imshow(df.corr(numeric_only=True), text_auto=True)`
-   - Histogram: `px.histogram(df, x='col')`
-   - Scatter: `px.scatter(df, x='col1', y='col2')`
-4. For ML queries, use sklearn — assign predictions/metrics to `answer`.
-5. If a column doesn't exist, pick the closest matching one gracefully.
-6. You may produce both `answer` AND `fig` if appropriate.
-7. Do NOT use `print()`. Do NOT include explanations.
-8. Return ONLY a Python code block:
+MODE A — CONVERSATIONAL:
+Use this for: greetings, capability questions, dataset explanations, column meanings, concept definitions, strategic advice, opinions, "what should I analyze", "what is X", "who are you", etc.
+Just reply naturally in plain text. Keep it to 2-5 sentences. Use **bold** for key terms.
 
+MODE B — CODE EXECUTION:
+Use this when the user wants actual data: statistics, computations, filters, aggregations, charts, predictions, "show me", "find", "calculate", "plot", "what is the average/min/max/top/cheapest/highest/lowest/most/least", comparisons, correlations, ML models, etc.
+Write a Python code block. Rules:
+- `df` is already loaded — never reload from file
+- For data results, assign to `answer` (DataFrame, Series, scalar)
+- For charts, assign a Plotly figure to `fig` (use px or go)
+- Never use `px.dataframe`, `px.table`, or `go.Table`
+- Never use `print()`
+- You may produce both `answer` and `fig`
+
+Output the code block like this:
 ```python
-# code here
-```"""
+# your code
+```
 
-        code_resp = client.chat.completions.create(
+No explanations inside the code block. Code only."""
+
+    try:
+        resp = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": code_prompt}],
-            temperature=0
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": message}
+            ],
+            temperature=0.1,
+            max_tokens=1500
         )
-        llm_response = code_resp.choices[0].message.content
-        
-        # Extract code block
-        code_match = re.search(r"```python\n(.*?)\n```", llm_response, re.DOTALL)
-        code_str = code_match.group(1) if code_match else llm_response
-        
-        # Build execution namespace
-        namespace = {"df": df, "pd": pd, "np": np}
-        exec("import plotly.express as px\nimport plotly.graph_objects as go\nimport matplotlib.pyplot as plt\nimport seaborn as sns", namespace)
-        
-        # Reset Matplotlib
-        import matplotlib
+        llm_output = resp.choices[0].message.content.strip()
+
+        # ── Detect which mode was used ────────────────────────────────────
+        code_match = re.search(r"```python\n(.*?)\n```", llm_output, re.DOTALL)
+
+        # ── MODE A: Conversational reply ──────────────────────────────────
+        if not code_match:
+            return make_json_safe({
+                "status":      "success",
+                "intent":      "chat",
+                "code":        None,
+                "explanation": llm_output,
+                "answer":      None,
+                "chart":       None,
+                "image":       None,
+                "error":       None
+            })
+
+        # ── MODE B: Execute the generated code ────────────────────────────
+        code_str = code_match.group(1)
+
+        import io, sys, base64, matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
-        plt.clf()
-        plt.close('all')
-        
-        # Capture stdout
-        import io
-        import sys
-        stdout_capture = io.StringIO()
-        old_stdout = sys.stdout
-        sys.stdout = stdout_capture
-        
+        plt.clf(); plt.close('all')
+
+        namespace = {"df": df, "pd": pd, "np": np}
+        exec("import plotly.express as px\nimport plotly.graph_objects as go"
+             "\nimport matplotlib.pyplot as plt\nimport seaborn as sns", namespace)
+
+        stdout_buf = io.StringIO()
+        old_stdout, sys.stdout = sys.stdout, stdout_buf
+        exec_error = None
         try:
             exec(code_str, namespace)
             exec_success = True
-            exec_error = None
-        except Exception as err:
+        except Exception:
             exec_success = False
             exec_error = traceback.format_exc()
         finally:
             sys.stdout = old_stdout
-            
-        printed_output = stdout_capture.getvalue().strip()
-        fig    = namespace.get("fig", None)
-        answer = namespace.get("answer", None)
-        
-        # Fallback: use stdout if answer not explicitly set
-        if answer is None and printed_output:
-            answer = printed_output
-            
-        # Capture Matplotlib figure
+
+        printed = stdout_buf.getvalue().strip()
+        fig      = namespace.get("fig",    None)
+        answer   = namespace.get("answer", None)
+        if answer is None and printed:
+            answer = printed
+
+        # Capture matplotlib
         matplotlib_img = None
         if plt.get_fignums():
             try:
-                import base64
-                fig_plt = plt.gcf()
                 buf = io.BytesIO()
-                fig_plt.savefig(buf, format="png", bbox_inches="tight", dpi=150)
+                plt.gcf().savefig(buf, format="png", bbox_inches="tight", dpi=150)
                 buf.seek(0)
-                matplotlib_img = base64.b64encode(buf.read()).decode("utf-8")
-                plt.close(fig_plt)
-            except Exception as plot_err:
-                print(f"Matplotlib capture error: {plot_err}")
-        
-        # Convert Plotly chart to JSON
+                matplotlib_img = base64.b64encode(buf.read()).decode()
+                plt.close('all')
+            except Exception:
+                pass
+
         fig_json = json.loads(pio.to_json(fig)) if fig else None
-        
+
         # Serialize answer
         answer_data = None
         if isinstance(answer, (pd.DataFrame, pd.Series)):
-            df_answer = pd.DataFrame(answer)
-            df_safe = df_answer.map(make_json_safe) if hasattr(df_answer, "map") else df_answer.applymap(make_json_safe)
+            df_a = pd.DataFrame(answer)
+            df_s = df_a.map(make_json_safe) if hasattr(df_a, "map") else df_a.applymap(make_json_safe)
             answer_data = {
-                "type": "table",
-                "columns": list(df_safe.columns),
-                "records": df_safe.to_dict(orient="records")
+                "type":    "table",
+                "columns": list(df_s.columns),
+                "records": df_s.to_dict(orient="records")
             }
         elif answer is not None:
             answer_data = {"type": "text", "value": str(answer)}
-            
-        # Generate explanation
+
+        # Generate natural explanation of the result
         if exec_success:
-            has_chart = fig is not None or matplotlib_img is not None
-            has_table = answer_data is not None and answer_data.get("type") == "table"
-            result_preview = str(answer)[:1500] if answer is not None else "(visualization generated)"
+            result_preview = str(answer)[:1500] if answer is not None else "(chart generated)"
+            ex_prompt = f"""You are Sankhya — a data scientist giving a clear, insightful result summary.
 
-            explanation_prompt = f"""You are Sankhya — a brilliant AI data scientist known for clear, insightful explanations.
+User asked: "{message}"
+Result: {result_preview}
+Has chart: {"Yes" if fig or matplotlib_img else "No"}
+Has table: {"Yes" if answer_data and answer_data.get("type") == "table" else "No"}
 
-User Query: "{message}"
+Write 2-4 flowing sentences that:
+1. State what the result actually shows (numbers, patterns, findings — not "I processed")
+2. Highlight the most interesting or important finding in **bold**
+3. Suggest one smart follow-up the user might want to explore
 
-Produced:
-- Visualization: {"Yes" if has_chart else "No"}
-- Data Table: {"Yes" if has_table else "No"}
-- Result preview: {result_preview}
-
-Write a concise, insightful response (2-4 sentences):
-1. State what the result shows — don't say "I have processed", say what the data tells us
-2. Call out key numbers or patterns if visible
-3. Suggest one smart follow-up question
-Use **bold** for key numbers or column names. Flowing sentences, no bullet points."""
+No bullet points. No preamble."""
         else:
-            explanation_prompt = f"""You are Sankhya — an expert AI data scientist.
+            ex_prompt = f"""You are Sankhya — a helpful data scientist.
 
-User Query: "{message}"
-Error: {exec_error[:600] if exec_error else "Unknown error"}
+User asked: "{message}"
+Error encountered: {exec_error[:500] if exec_error else "unknown"}
 
-In 2-3 sentences: explain in plain English what went wrong and give one specific, actionable suggestion to rephrase the query. Be helpful and direct."""
+In 2-3 plain-English sentences: say what went wrong (without jargon) and give one concrete rephrasing suggestion the user can try."""
 
-        explanation_resp = client.chat.completions.create(
+        ex_resp = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": explanation_prompt}],
-            temperature=0.2
+            messages=[{"role": "user", "content": ex_prompt}],
+            temperature=0.3,
+            max_tokens=300
         )
-        explanation = explanation_resp.choices[0].message.content
-        
+        explanation = ex_resp.choices[0].message.content
+
         return make_json_safe({
-            "status": "success" if exec_success else "error",
-            "intent": "code",
-            "code": code_str,
+            "status":      "success" if exec_success else "error",
+            "intent":      "code",
+            "code":        code_str,
             "explanation": explanation,
-            "answer": answer_data,
-            "chart": fig_json,
-            "image": matplotlib_img,
-            "error": exec_error
+            "answer":      answer_data,
+            "chart":       fig_json,
+            "image":       matplotlib_img,
+            "error":       exec_error
         })
-        
+
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Failed to query AI: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"AI query failed: {str(e)}")
 
-# Mount static files (will be loaded at /)
+# Mount static files
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
+
+
