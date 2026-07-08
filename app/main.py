@@ -6,10 +6,111 @@ import pandas as pd
 import numpy as np
 import os
 import re
+import ast
 import json
 import traceback
+import threading
 import plotly.io as pio
 from openai import OpenAI
+
+# ── Safe builtins: only math/data-safe functions allowed in exec() ──────────
+_SAFE_BUILTINS = {
+    "abs": abs, "all": all, "any": any, "bool": bool,
+    "dict": dict, "enumerate": enumerate, "filter": filter,
+    "float": float, "frozenset": frozenset, "getattr": getattr,
+    "hasattr": hasattr, "int": int, "isinstance": isinstance,
+    "issubclass": issubclass, "iter": iter, "len": len,
+    "list": list, "map": map, "max": max, "min": min,
+    "next": next, "print": print, "range": range, "repr": repr,
+    "reversed": reversed, "round": round, "set": set,
+    "slice": slice, "sorted": sorted, "str": str, "sum": sum,
+    "tuple": tuple, "type": type, "zip": zip,
+    "True": True, "False": False, "None": None,
+}
+
+# ── Blocked AST nodes and import names ──────────────────────────────────────
+_BLOCKED_IMPORTS = {
+    "os", "sys", "subprocess", "shutil", "pathlib", "socket",
+    "urllib", "http", "requests", "httpx", "ftplib", "smtplib",
+    "pickle", "shelve", "dbm", "sqlite3", "multiprocessing",
+    "threading", "concurrent", "asyncio", "signal", "ctypes",
+    "importlib", "builtins", "inspect", "gc", "resource",
+    "tempfile", "glob", "fnmatch", "io",
+}
+_BLOCKED_ATTRS = {
+    "__import__", "__builtins__", "__subclasses__", "__globals__",
+    "__code__", "__closure__", "mro", "__bases__",
+}
+
+def _check_code_safety(code: str) -> tuple[bool, str]:
+    """
+    Static AST scan. Returns (is_safe, reason).
+    Runs BEFORE exec() — blocks obvious attack vectors.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        return False, f"Syntax error: {e}"
+
+    for node in ast.walk(tree):
+        # Block dangerous imports
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = (
+                [alias.name.split(".")[0] for alias in node.names]
+                if isinstance(node, ast.Import)
+                else ([node.module.split(".")[0]] if node.module else [])
+            )
+            for name in names:
+                if name in _BLOCKED_IMPORTS:
+                    return False, f"Import of '{name}' is not allowed."
+
+        # Block dangerous attribute access
+        if isinstance(node, ast.Attribute) and node.attr in _BLOCKED_ATTRS:
+            return False, f"Access to '{node.attr}' is not allowed."
+
+        # Block dangerous builtin calls by name
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in {
+                "eval", "exec", "compile", "open", "__import__",
+                "breakpoint", "input", "memoryview",
+            }:
+                return False, f"Call to '{func.id}' is not allowed."
+
+        # Block infinite loops: while True / while 1
+        if isinstance(node, ast.While):
+            test = node.test
+            is_true_const = (
+                (isinstance(test, ast.Constant) and test.value in (True, 1))
+                or (isinstance(test, ast.Name) and test.id == "True")
+            )
+            if is_true_const:
+                return False, "Infinite loops (while True) are not allowed."
+
+    return True, ""
+
+
+def _exec_with_timeout(code: str, namespace: dict, timeout: int = 30) -> tuple[bool, str | None]:
+    """
+    Run exec() in a daemon thread with a hard timeout.
+    Returns (completed_before_timeout, error_or_None).
+    """
+    result = {"error": None, "done": False}
+
+    def _run():
+        try:
+            exec(code, namespace)  # noqa: S102
+        except Exception:
+            result["error"] = traceback.format_exc()
+        finally:
+            result["done"] = True
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout)
+    if not result["done"]:
+        return False, "Execution timed out (30 s limit). Try a simpler query."
+    return True, result["error"]
 
 app = FastAPI(title="Sankhya: AI Data Analyst Backend")
 
@@ -106,6 +207,9 @@ async def upload_file(file: UploadFile = File(...)):
 @app.post("/chat")
 async def chat_with_data(message: str = Form(...)):
 
+    # ── Input guard ────────────────────────────────────────────────────────
+    if len(message) > 2000:
+        raise HTTPException(status_code=400, detail="Message too long (max 2000 characters).")
     if GROQ_API_KEY == "missing_key":
         raise HTTPException(status_code=400, detail="GROQ_API_KEY environment variable is not configured.")
     if "df" not in store:
@@ -189,27 +293,59 @@ No explanations inside the code block. Code only."""
                 "error":       None
             })
 
-        # ── MODE B: Execute the generated code ────────────────────────────
+        # ── MODE B: Security scan → Execute the generated code ───────────
         code_str = code_match.group(1)
+
+        # 1. Static AST safety check — runs BEFORE any execution
+        is_safe, reason = _check_code_safety(code_str)
+        if not is_safe:
+            return make_json_safe({
+                "status":      "error",
+                "intent":      "code",
+                "code":        code_str,
+                "explanation": f"This query was blocked by the security filter: {reason}. Please rephrase your request to focus on data analysis.",
+                "answer":      None,
+                "chart":       None,
+                "image":       None,
+                "error":       reason
+            })
 
         import io, sys, base64, matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
         plt.clf(); plt.close('all')
 
-        namespace = {"df": df, "pd": pd, "np": np}
-        exec("import plotly.express as px\nimport plotly.graph_objects as go"
-             "\nimport matplotlib.pyplot as plt\nimport seaborn as sns", namespace)
+        # 2. Restricted namespace — libraries are imported with full builtins
+        #    in an isolated seed namespace, then their references are copied
+        #    into the user namespace which has the safe builtins allowlist.
+        _seed = {}
+        exec(
+            "import plotly.express as px\nimport plotly.graph_objects as go"
+            "\nimport matplotlib.pyplot as plt\nimport seaborn as sns",
+            _seed
+        )
+        namespace = {
+            "__builtins__": _SAFE_BUILTINS,
+            "df": df, "pd": pd, "np": np,
+            "px": _seed["px"], "go": _seed["go"],
+            "plt": _seed["plt"], "sns": _seed["sns"],
+        }
 
+        # 3. Captured stdout + 30-second execution timeout
         stdout_buf = io.StringIO()
         old_stdout, sys.stdout = sys.stdout, stdout_buf
         exec_error = None
         try:
-            exec(code_str, namespace)
-            exec_success = True
-        except Exception:
-            exec_success = False
-            exec_error = traceback.format_exc()
+            completed, raw_error = _exec_with_timeout(code_str, namespace, timeout=30)
+            if not completed:
+                exec_success = False
+                exec_error = raw_error  # timeout message
+            elif raw_error:
+                exec_success = False
+                # Sanitize: return only last traceback line, never full stack
+                exec_error = raw_error.strip().splitlines()[-1]
+            else:
+                exec_success = True
         finally:
             sys.stdout = old_stdout
 
