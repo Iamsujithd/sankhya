@@ -105,12 +105,14 @@ async def upload_file(file: UploadFile = File(...)):
 
 @app.post("/chat")
 async def chat_with_data(message: str = Form(...)):
+
     if GROQ_API_KEY == "missing_key":
         raise HTTPException(status_code=400, detail="GROQ_API_KEY environment variable is not configured! Please set it before running queries.")
     if "df" not in store:
         raise HTTPException(status_code=400, detail="No dataset uploaded yet. Please upload a dataset first!")
     
     df = store["df"]
+    filename = store.get("filename", "uploaded file")
     cols_info = ", ".join([f"{col} ({dtype})" for col, dtype in zip(df.columns, df.dtypes)])
     
     # Detect available sklearn for ML queries
@@ -126,8 +128,74 @@ async def chat_with_data(message: str = Form(...)):
         vals = df[col].dropna().head(3).tolist()
         sample_vals[col] = vals
 
-    # Prompt to write code
-    code_prompt = f"""You are Sankhya — a world-class AI data scientist and mathematician. The user uploaded a dataset and you must write Python code that fully and correctly answers their query.
+    try:
+        # ══════════════════════════════════════════════════════════════════
+        # STEP 1: INTENT CLASSIFICATION
+        # Decide whether this needs code execution or a plain chat reply.
+        # Uses a tiny max_tokens=5 call — very fast and cheap.
+        # ══════════════════════════════════════════════════════════════════
+        classifier_prompt = f"""You are a query intent classifier for an AI data analyst tool.
+The user has uploaded a dataset with these columns: {cols_info}
+Dataset: {filename} — {df.shape[0]} rows × {df.shape[1]} columns
+
+Classify the user's message as exactly one of:
+- CODE  → needs data computation, statistics, filtering, aggregation, visualization, ML prediction, groupby, correlation, missing values, sorting, or any operation ON the dataset rows/columns
+- CHAT  → general conversation, greetings ("hi", "hello", "thanks"), questions about capabilities ("what can you do?"), meta questions, explaining a concept without computing, "who are you", "what is this tool", vague filler messages
+
+User message: "{message}"
+
+Reply with a single word only: CODE or CHAT"""
+
+        intent_resp = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": classifier_prompt}],
+            temperature=0,
+            max_tokens=5
+        )
+        raw_intent = intent_resp.choices[0].message.content.strip().upper()
+        is_code = raw_intent.startswith("CODE")
+
+        # ══════════════════════════════════════════════════════════════════
+        # STEP 2A: CHAT PATH — conversational reply, no code execution
+        # ══════════════════════════════════════════════════════════════════
+        if not is_code:
+            system_prompt = f"""You are Sankhya — a warm, expert AI data companion and data scientist.
+The user has loaded a dataset called "{filename}" with {df.shape[0]} rows and {df.shape[1]} columns.
+Columns and types: {cols_info}
+Sample values per column: {sample_vals}
+
+Guidelines:
+- If greeted, respond warmly and briefly introduce yourself and your capabilities for this specific dataset.
+- If asked what you can do, list specific things relevant to THIS dataset (mention column names, suggest useful analyses).
+- If asked about a column by name, describe it based on its type and sample values.
+- If asked a general data science concept, explain it clearly and briefly, relating it to the loaded dataset where possible.
+- Keep responses concise (2-5 sentences max). Use **bold** for emphasis on key terms or column names."""
+
+            chat_resp = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": message}
+                ],
+                temperature=0.6
+            )
+            reply = chat_resp.choices[0].message.content
+
+            return make_json_safe({
+                "status": "success",
+                "intent": "chat",
+                "code": None,
+                "explanation": reply,
+                "answer": None,
+                "chart": None,
+                "image": None,
+                "error": None
+            })
+
+        # ══════════════════════════════════════════════════════════════════
+        # STEP 2B: CODE PATH — generate & execute Python, then explain
+        # ══════════════════════════════════════════════════════════════════
+        code_prompt = f"""You are Sankhya — a world-class AI data scientist. The user uploaded a dataset and you must write Python code that fully and correctly answers their query.
 
 === DATASET CONTEXT ===
 Preloaded variable: `df` (pandas DataFrame — DO NOT reload from file)
@@ -140,55 +208,46 @@ scikit-learn available: {sklearn_available}
 {message}
 
 === RULES ===
-1. **DataFrame**: Use the existing `df` variable. Never read from a file.
-2. **Tabular output**: Assign a DataFrame or Series to `answer`.
-   - Stats: `answer = df.describe()` or `answer = df.groupby(...).agg(...)`
-   - Filter: `answer = df[df['col'] > value]`
-   - Correlation: `answer = df.corr(numeric_only=True)` then plot it
-   - Missing: `answer = df.isnull().sum().reset_index(name='missing_count')`
-3. **Charts**: Assign a Plotly figure to `fig`.
-   - Use `import plotly.express as px` or `import plotly.graph_objects as go`
-   - NEVER use `px.dataframe`, `px.table`, `go.Table` as primary output — assign tables to `answer` instead
-   - For heatmaps: `fig = px.imshow(df.corr(numeric_only=True), ...)` 
-   - For histograms: use `px.histogram(df, x='col')`
-   - For scatter: use `px.scatter(df, x='col1', y='col2')`
-   - For bar: use `px.bar(df, x='col', y='val')`
-4. **Machine learning** (if sklearn available): Use sklearn for regression, classification, or clustering. Always assign results to `answer`.
-5. **Text analytics**: If the query involves text columns, use basic string operations or sklearn's TfidfVectorizer.
-6. **Handle errors gracefully**: If a column doesn't exist, select the closest matching one. If numeric operations are requested on text columns, convert or skip gracefully.
-7. **One answer at a time**: If the user asks for both a table and chart, produce both `answer` AND `fig`.
-8. Do NOT use `print()` — assign results to `answer` or `fig`.
-9. Do NOT include any explanation. Return ONLY the Python code block:
+1. Use the existing `df` variable. Never read from a file.
+2. For tabular output (stats, filters, groupby, aggregations), assign a DataFrame or Series to `answer`.
+3. For charts, assign a Plotly figure to `fig` using `px` or `go`.
+   - NEVER use `px.dataframe`, `px.table`, or `go.Table` — assign data to `answer` instead.
+   - Heatmap: `fig = px.imshow(df.corr(numeric_only=True), text_auto=True)`
+   - Histogram: `px.histogram(df, x='col')`
+   - Scatter: `px.scatter(df, x='col1', y='col2')`
+4. For ML queries, use sklearn — assign predictions/metrics to `answer`.
+5. If a column doesn't exist, pick the closest matching one gracefully.
+6. You may produce both `answer` AND `fig` if appropriate.
+7. Do NOT use `print()`. Do NOT include explanations.
+8. Return ONLY a Python code block:
 
 ```python
 # code here
 ```"""
 
-    try:
-        # Call Groq API
-        response = client.chat.completions.create(
+        code_resp = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": code_prompt}],
             temperature=0
         )
-        llm_response = response.choices[0].message.content
+        llm_response = code_resp.choices[0].message.content
         
-        # Parse python code block
+        # Extract code block
         code_match = re.search(r"```python\n(.*?)\n```", llm_response, re.DOTALL)
         code_str = code_match.group(1) if code_match else llm_response
         
-        # Prepare namespace for execution
+        # Build execution namespace
         namespace = {"df": df, "pd": pd, "np": np}
         exec("import plotly.express as px\nimport plotly.graph_objects as go\nimport matplotlib.pyplot as plt\nimport seaborn as sns", namespace)
         
-        # Reset Matplotlib state before execution
+        # Reset Matplotlib
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
         plt.clf()
         plt.close('all')
         
-        # Execute code with stdout capturing
+        # Capture stdout
         import io
         import sys
         stdout_capture = io.StringIO()
@@ -206,90 +265,83 @@ scikit-learn available: {sklearn_available}
             sys.stdout = old_stdout
             
         printed_output = stdout_capture.getvalue().strip()
-            
-        fig = namespace.get("fig", None)
+        fig    = namespace.get("fig", None)
         answer = namespace.get("answer", None)
         
-        # Fallback to stdout if answer is not set
+        # Fallback: use stdout if answer not explicitly set
         if answer is None and printed_output:
             answer = printed_output
             
-        # Capture Matplotlib figure if generated
+        # Capture Matplotlib figure
         matplotlib_img = None
         if plt.get_fignums():
             try:
+                import base64
                 fig_plt = plt.gcf()
                 buf = io.BytesIO()
                 fig_plt.savefig(buf, format="png", bbox_inches="tight", dpi=150)
                 buf.seek(0)
-                import base64
                 matplotlib_img = base64.b64encode(buf.read()).decode("utf-8")
                 plt.close(fig_plt)
             except Exception as plot_err:
-                print(f"Error capturing matplotlib plot: {plot_err}")
+                print(f"Matplotlib capture error: {plot_err}")
         
-        # Convert chart to JSON
+        # Convert Plotly chart to JSON
         fig_json = json.loads(pio.to_json(fig)) if fig else None
         
-        # Parse answer output
+        # Serialize answer
         answer_data = None
         if isinstance(answer, (pd.DataFrame, pd.Series)):
             df_answer = pd.DataFrame(answer)
-            # Map elements to be JSON safe
-            df_json = df_answer.map(make_json_safe) if hasattr(df_answer, "map") else df_answer.applymap(make_json_safe)
+            df_safe = df_answer.map(make_json_safe) if hasattr(df_answer, "map") else df_answer.applymap(make_json_safe)
             answer_data = {
                 "type": "table",
-                "columns": list(df_json.columns),
-                "records": df_json.to_dict(orient="records")
+                "columns": list(df_safe.columns),
+                "records": df_safe.to_dict(orient="records")
             }
         elif answer is not None:
-            answer_data = {
-                "type": "text",
-                "value": str(answer)
-            }
+            answer_data = {"type": "text", "value": str(answer)}
             
-        # Explanatory prompt
+        # Generate explanation
         if exec_success:
-            has_chart = fig is not None
+            has_chart = fig is not None or matplotlib_img is not None
             has_table = answer_data is not None and answer_data.get("type") == "table"
-            has_image = matplotlib_img is not None
-            result_preview = str(answer)[:1500] if answer is not None else "(chart/visualization generated)"
+            result_preview = str(answer)[:1500] if answer is not None else "(visualization generated)"
 
-            summary_prompt = f"""You are Sankhya — a brilliant AI data scientist known for clear, insightful explanations.
+            explanation_prompt = f"""You are Sankhya — a brilliant AI data scientist known for clear, insightful explanations.
 
 User Query: "{message}"
 
-What was produced:
-- Chart/Plot: {"Yes" if has_chart or has_image else "No"}
+Produced:
+- Visualization: {"Yes" if has_chart else "No"}
 - Data Table: {"Yes" if has_table else "No"}
 - Result preview: {result_preview}
 
-Write a concise, insightful explanation (2-4 sentences) that:
-1. Directly answers the user's query — don't say "I have processed"; say what the result actually tells us
-2. Highlights key findings or notable numbers if applicable
-3. Suggests a smart follow-up question the user might want to ask
-Use **bold** for important numbers or column names. Be professional yet warm. No bullet points — flowing sentences only."""
+Write a concise, insightful response (2-4 sentences):
+1. State what the result shows — don't say "I have processed", say what the data tells us
+2. Call out key numbers or patterns if visible
+3. Suggest one smart follow-up question
+Use **bold** for key numbers or column names. Flowing sentences, no bullet points."""
         else:
-            summary_prompt = f"""You are Sankhya — an expert AI data scientist.
+            explanation_prompt = f"""You are Sankhya — an expert AI data scientist.
 
 User Query: "{message}"
-Execution error: {exec_error[:600] if exec_error else "Unknown error"}
+Error: {exec_error[:600] if exec_error else "Unknown error"}
 
-Explain in 2-3 sentences:
-1. What likely went wrong (in plain English, not technical jargon)
-2. A specific, actionable suggestion to reformulate the query (e.g. "Try asking: 'What is the average MEDV by CHAS?'")
-Be warm and helpful. No apologies needed — just guide them forward."""
+In 2-3 sentences: explain in plain English what went wrong and give one specific, actionable suggestion to rephrase the query. Be helpful and direct."""
 
-        summary_response = client.chat.completions.create(
+        explanation_resp = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": summary_prompt}],
+            messages=[{"role": "user", "content": explanation_prompt}],
             temperature=0.2
-        ).choices[0].message.content
+        )
+        explanation = explanation_resp.choices[0].message.content
         
         return make_json_safe({
             "status": "success" if exec_success else "error",
+            "intent": "code",
             "code": code_str,
-            "explanation": summary_response,
+            "explanation": explanation,
             "answer": answer_data,
             "chart": fig_json,
             "image": matplotlib_img,
