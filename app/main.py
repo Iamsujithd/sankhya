@@ -112,6 +112,35 @@ def _exec_with_timeout(code: str, namespace: dict, timeout: int = 30) -> tuple[b
         return False, "Execution timed out (30 s limit). Try a simpler query."
     return True, result["error"]
 
+
+# ── Pre-execution import stripper ────────────────────────────────────────────
+_SAFE_IMPORT_PATTERN = re.compile(
+    r'^\s*import\s+(pandas|numpy|plotly|matplotlib|seaborn|sklearn|scipy)'
+    r'(\s+as\s+\w+)?\s*$|'
+    r'^\s*from\s+(pandas|numpy|plotly|matplotlib|seaborn|sklearn|scipy)\b.*$',
+    re.MULTILINE
+)
+
+def _strip_known_imports(code: str) -> str:
+    """Remove lines that import already-injected libraries so exec() doesn't
+    hit the missing __import__ builtin."""
+    cleaned = []
+    for line in code.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('import ') or stripped.startswith('from '):
+            # Keep the line only if it is NOT a known-safe library import
+            # (unknown imports will fail naturally in exec and be caught)
+            module = stripped.split()[1].split('.')[0]
+            if module not in {
+                'pandas', 'numpy', 'plotly', 'matplotlib',
+                'seaborn', 'sklearn', 'scipy'
+            }:
+                cleaned.append(line)
+            # else: silently drop — already in namespace
+        else:
+            cleaned.append(line)
+    return '\n'.join(cleaned)
+
 app = FastAPI(title="Sankhya: AI Data Analyst Backend")
 
 # Enable CORS for local testing
@@ -252,10 +281,12 @@ MODE B — CODE EXECUTION:
 Use this when the user wants actual data: statistics, computations, filters, aggregations, charts, predictions, "show me", "find", "calculate", "plot", "what is the average/min/max/top/cheapest/highest/lowest/most/least", comparisons, correlations, ML models, etc.
 Write a Python code block. Rules:
 - `df` is already loaded — never reload from file
-- For data results, assign to `answer` (DataFrame, Series, scalar)
+- NEVER write any import statements — pd, np, px, go, plt, sns, sklearn are ALL pre-imported
+- For data results, assign to `answer` (DataFrame, Series, scalar, or string)
+- For a dataset summary use: answer = df.describe(include='all').to_string()
 - For charts, assign a Plotly figure to `fig` (use px or go)
 - Never use `px.dataframe`, `px.table`, or `go.Table`
-- Never use `print()`
+- Never use `print()` or `df.info()` — they do not return values
 - You may produce both `answer` and `fig`
 
 Output the code block like this:
@@ -295,6 +326,10 @@ No explanations inside the code block. Code only."""
 
         # ── MODE B: Security scan → Execute the generated code ───────────
         code_str = code_match.group(1)
+
+        # 0. Strip known-safe library imports (LLM sometimes adds them even
+        #    when instructed not to — __import__ isn't in _SAFE_BUILTINS)
+        code_str = _strip_known_imports(code_str)
 
         # 1. Static AST safety check — runs BEFORE any execution
         is_safe, reason = _check_code_safety(code_str)
