@@ -297,94 +297,111 @@ Output the code block like this:
 No explanations inside the code block. Code only."""
 
     try:
-        resp = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": message}
-            ],
-            temperature=0.1,
-            max_tokens=1500
-        )
-        llm_output = resp.choices[0].message.content.strip()
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": message}
+        ]
+        
+        max_retries = 3
+        printed = ""
+        for attempt in range(max_retries):
+            resp = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=messages,
+                temperature=0.1,
+                max_tokens=1500
+            )
+            llm_output = resp.choices[0].message.content.strip()
+            messages.append({"role": "assistant", "content": llm_output})
 
-        # ── Detect which mode was used ────────────────────────────────────
-        code_match = re.search(r"```python\n(.*?)\n```", llm_output, re.DOTALL)
+            # ── Detect which mode was used ────────────────────────────────────
+            code_match = re.search(r"```python\n(.*?)\n```", llm_output, re.DOTALL)
 
-        # ── MODE A: Conversational reply ──────────────────────────────────
-        if not code_match:
-            return make_json_safe({
-                "status":      "success",
-                "intent":      "chat",
-                "code":        None,
-                "explanation": llm_output,
-                "answer":      None,
-                "chart":       None,
-                "image":       None,
-                "error":       None
-            })
+            # ── MODE A: Conversational reply ──────────────────────────────────
+            if not code_match:
+                return make_json_safe({
+                    "status":      "success",
+                    "intent":      "chat",
+                    "code":        None,
+                    "explanation": llm_output,
+                    "answer":      None,
+                    "chart":       None,
+                    "image":       None,
+                    "error":       None
+                })
 
-        # ── MODE B: Security scan → Execute the generated code ───────────
-        code_str = code_match.group(1)
+            # ── MODE B: Security scan → Execute the generated code ───────────
+            code_str = code_match.group(1)
 
-        # 0. Strip known-safe library imports (LLM sometimes adds them even
-        #    when instructed not to — __import__ isn't in _SAFE_BUILTINS)
-        code_str = _strip_known_imports(code_str)
+            # 0. Strip known-safe library imports
+            code_str = _strip_known_imports(code_str)
 
-        # 1. Static AST safety check — runs BEFORE any execution
-        is_safe, reason = _check_code_safety(code_str)
-        if not is_safe:
-            return make_json_safe({
-                "status":      "error",
-                "intent":      "code",
-                "code":        code_str,
-                "explanation": f"This query was blocked by the security filter: {reason}. Please rephrase your request to focus on data analysis.",
-                "answer":      None,
-                "chart":       None,
-                "image":       None,
-                "error":       reason
-            })
-
-        import io, sys, base64, matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-        plt.clf(); plt.close('all')
-
-        # 2. Restricted namespace — libraries are imported with full builtins
-        #    in an isolated seed namespace, then their references are copied
-        #    into the user namespace which has the safe builtins allowlist.
-        _seed = {}
-        exec(
-            "import plotly.express as px\nimport plotly.graph_objects as go"
-            "\nimport matplotlib.pyplot as plt\nimport seaborn as sns",
-            _seed
-        )
-        namespace = {
-            "__builtins__": _SAFE_BUILTINS,
-            "df": df, "pd": pd, "np": np,
-            "px": _seed["px"], "go": _seed["go"],
-            "plt": _seed["plt"], "sns": _seed["sns"],
-        }
-
-        # 3. Captured stdout + 30-second execution timeout
-        stdout_buf = io.StringIO()
-        old_stdout, sys.stdout = sys.stdout, stdout_buf
-        exec_error = None
-        try:
-            completed, raw_error = _exec_with_timeout(code_str, namespace, timeout=30)
-            if not completed:
+            # 1. Static AST safety check — runs BEFORE any execution
+            is_safe, reason = _check_code_safety(code_str)
+            if not is_safe:
                 exec_success = False
-                exec_error = raw_error  # timeout message
-            elif raw_error:
-                exec_success = False
-                # Sanitize: return only last traceback line, never full stack
-                exec_error = raw_error.strip().splitlines()[-1]
+                exec_error = f"Blocked by security filter: {reason}"
+                if attempt < max_retries - 1:
+                    messages.append({
+                        "role": "user",
+                        "content": f"The code was blocked: {reason}. Please analyze and provide the corrected python code block."
+                    })
+                    continue
+                else:
+                    break
+
+            import io, sys, base64, matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            plt.clf(); plt.close('all')
+
+            # 2. Restricted namespace
+            _seed = {}
+            exec(
+                "import plotly.express as px\nimport plotly.graph_objects as go"
+                "\nimport matplotlib.pyplot as plt\nimport seaborn as sns",
+                _seed
+            )
+            namespace = {
+                "__builtins__": _SAFE_BUILTINS,
+                "df": df, "pd": pd, "np": np,
+                "px": _seed["px"], "go": _seed["go"],
+                "plt": _seed["plt"], "sns": _seed["sns"],
+            }
+
+            # 3. Captured stdout + 30-second execution timeout
+            stdout_buf = io.StringIO()
+            old_stdout, sys.stdout = sys.stdout, stdout_buf
+            exec_error = None
+            try:
+                completed, raw_error = _exec_with_timeout(code_str, namespace, timeout=30)
+                if not completed:
+                    exec_success = False
+                    exec_error = raw_error  # timeout message
+                elif raw_error:
+                    exec_success = False
+                    # Sanitize: return only last traceback line, never full stack
+                    exec_error = raw_error.strip().splitlines()[-1]
+                else:
+                    exec_success = True
+            finally:
+                sys.stdout = old_stdout
+            
+            printed = stdout_buf.getvalue().strip()
+            
+            if exec_success:
+                break
             else:
-                exec_success = True
-        finally:
-            sys.stdout = old_stdout
+                if attempt < max_retries - 1:
+                    messages.append({
+                        "role": "user",
+                        "content": f"The code execution failed with this error:\n{exec_error}\n\nPlease analyze the error and provide the corrected python code block."
+                    })
+                    continue
+                else:
+                    break
 
-        printed = stdout_buf.getvalue().strip()
+
         fig      = namespace.get("fig",    None)
         answer   = namespace.get("answer", None)
         if answer is None and printed:
