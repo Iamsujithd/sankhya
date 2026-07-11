@@ -50,20 +50,7 @@ export GROQ_API_KEY=your_key_here
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Open [http://localhost:8000](http://localhost:8000)
-
----
-
-## Deploy on Render
-
-1. Push to GitHub
-2. Create a new **Web Service** on [render.com](https://render.com)
-3. Connect your repo
-4. Set:
-   - **Build command:** `pip install -r requirements.txt`
-   - **Start command:** `gunicorn app.main:app -w 1 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --timeout 120`
-5. Add environment variable: `GROQ_API_KEY = <your key>`
-6. Deploy 🚀
+Open [https://sankhya.onrender.com]
 
 ---
 
